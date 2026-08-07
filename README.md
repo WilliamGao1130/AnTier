@@ -78,6 +78,16 @@ sdk.dir=/path/to/Android/sdk
 
 APK 未包含内核库时应用会在 `System.loadLibrary("easytier_android_jni")` 处崩溃，必须先执行 `./build-jni.sh` 生成 `.so`。
 
+### 4. GitHub Actions 自动构建（可选）
+
+仓库提供了 [.github/workflows/build-apk.yml](.github/workflows/build-apk.yml)：在 GitHub 上自动完成"构建 JNI 库 → 打包 APK"全流程，无需本地安装 Rust/NDK/protoc。
+
+- 手动触发：Actions 页面选择 `Build APK` → `Run workflow`，可指定 ABI（默认 `arm64-v8a x86_64`）和 EasyTier 源码引用（默认 `main`）；
+- 自动触发：push/PR 修改 `app/**`、`build-jni.sh`、`gradle/**` 或工作流本身时；
+- 产物：`app-debug.apk` 与 `app-release-unsigned.apk` 以 artifact 形式上传。
+
+工作流使用的环境与 EasyTier 官方 CI 一致：JDK 17、Android SDK/NDK 26.0.10792818、Rust 1.95、protoc 35.1。
+
 ## AIDL 接口（IEasyTierService）
 
 | 方法 | 说明 |
