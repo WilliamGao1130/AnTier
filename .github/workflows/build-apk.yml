@@ -66,6 +66,9 @@ jobs:
         with:
           toolchain: '1.95'
           cache: false
+          # 不注入 -D warnings：EasyTier main 存在未使用代码等警告，
+          # 保留默认 warn 级别，警告照常显示但不会导致编译失败。
+          rustflags: ''
 
       - name: Set up protoc
         uses: arduino/setup-protoc@v3
