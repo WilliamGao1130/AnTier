@@ -1,0 +1,9 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+.third_party/
+app/src/main/jniLibs/**/*.so
+*.apk
