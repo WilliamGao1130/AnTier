@@ -8,6 +8,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- 列出全部已安装应用供白名单/黑名单选择。
+         注意：上架 Google Play 时该权限受限，需在政策/数据安全中说明用途。 -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
     <application
         android:label="@string/app_name"
         android:theme="@style/Theme.AnTier">

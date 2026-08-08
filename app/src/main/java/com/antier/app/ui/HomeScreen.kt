@@ -51,6 +51,7 @@ fun HomeScreen(viewModel: MainViewModel = viewModel()) {
     var toml by rememberSaveable { mutableStateOf(DEFAULT_CONFIG) }
     var cfgUrl by rememberSaveable { mutableStateOf("") }
     var machineId by rememberSaveable { mutableStateOf("android-device") }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
 
     val service by viewModel.service.collectAsState()
     val statusText by viewModel.statusText.collectAsState()
@@ -60,13 +61,16 @@ fun HomeScreen(viewModel: MainViewModel = viewModel()) {
     val lastError by viewModel.lastError.collectAsState()
     val cfgConnected by viewModel.configServerConnected.collectAsState()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
+    if (showSettings) {
+        VpnSettingsScreen(onBack = { showSettings = false })
+    } else {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
         Text("AnTier · 原生控件控制 EasyTier 内核", style = MaterialTheme.typography.headlineSmall)
         Text(
             "AIDL 服务: ${if (service != null) "已连接" else "未连接"}",
@@ -94,6 +98,12 @@ fun HomeScreen(viewModel: MainViewModel = viewModel()) {
                     OutlinedButton(onClick = { viewModel.refreshStatus() }) {
                         Text("刷新状态")
                     }
+                }
+                OutlinedButton(
+                    onClick = { showSettings = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("VPN 全局设置")
                 }
             }
         }
@@ -221,6 +231,7 @@ fun HomeScreen(viewModel: MainViewModel = viewModel()) {
                 }
                 Text("连接状态: ${if (cfgConnected) "已连接" else "未连接"}")
             }
+        }
         }
     }
 }
