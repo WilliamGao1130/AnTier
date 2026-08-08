@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -79,7 +80,9 @@ fun HomeScreen(
         },
         floatingActionButton = {
             Column(
-                modifier = Modifier.padding(end = 36.dp, bottom = 24.dp),
+                modifier = Modifier
+                    .navigationBarsPadding()
+                    .padding(end = 36.dp, bottom = 24.dp),
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
@@ -104,7 +107,7 @@ fun HomeScreen(
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 16.dp, end = 24.dp, top = 8.dp, bottom = 232.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 24.dp, top = 8.dp, bottom = 240.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 if (networks.isEmpty()) {
