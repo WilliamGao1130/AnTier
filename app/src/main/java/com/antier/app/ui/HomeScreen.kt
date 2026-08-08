@@ -1,263 +1,206 @@
 package com.antier.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.antier.app.ui.MainViewModel
+import androidx.compose.material3.Button
 
-private val DEFAULT_CONFIG = """
-    instance_name = "antier_android"
-    hostname = "antier-android"
-    listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
-
-    [network_identity]
-    network_name = "antier_demo_net"
-    network_secret = "antier_demo_secret"
-
-    [flags]
-    enable_encryption = true
-    enable_ipv6 = true
-    mtu = 1380
-    no_tun = false
-    use_smoltcp = false
-    enable_exit_node = false
-
-    [console_logger]
-    level = "info"
-""".trimIndent()
-
+/**
+ * 主界面（目录页）。
+ *
+ * - 顶部标题栏：左侧 AnTier，右侧设置按钮。
+ * - 底部右侧：圆形 + 新建网络；有任意网络运行时，其上方显示圆形 X 关闭全部。
+ * - 主体：垂直滚动网络卡片列表；列表底部留白足够，使最后一个卡片可滚到
+ *   悬浮按钮上方；滚动条位于最右缘，悬浮按钮内缩不遮挡。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(viewModel: MainViewModel = viewModel()) {
-    var toml by rememberSaveable { mutableStateOf(DEFAULT_CONFIG) }
-    var cfgUrl by rememberSaveable { mutableStateOf("") }
-    var machineId by rememberSaveable { mutableStateOf("android-device") }
-    var showSettings by rememberSaveable { mutableStateOf(false) }
-    var showConfig by rememberSaveable { mutableStateOf(false) }
-    var configTab by rememberSaveable { mutableStateOf(ConfigTab.WIZARD) }
-
-    val service by viewModel.service.collectAsState()
-    val statusText by viewModel.statusText.collectAsState()
-    val instances by viewModel.instances.collectAsState()
-    val activeTunInstance by viewModel.activeTunInstance.collectAsState()
-    val lastEvent by viewModel.lastEvent.collectAsState()
+fun HomeScreen(
+    viewModel: MainViewModel,
+    onCreateNetwork: () -> Unit,
+    onOpenNetwork: (String) -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    val networks by viewModel.networks.collectAsState()
     val lastError by viewModel.lastError.collectAsState()
-    val cfgConnected by viewModel.configServerConnected.collectAsState()
+    val anyRunning = networks.any { it.running }
+    val snackbarHostState = remember { SnackbarHostState() }
 
-    if (showSettings) {
-        VpnSettingsScreen(onBack = { showSettings = false })
-    } else if (showConfig) {
-        NetworkConfigScreen(
-            initialToml = toml,
-            initialTab = configTab,
-            onBack = { showConfig = false },
-            onApply = { newToml ->
-                toml = newToml
-                showConfig = false
-            }
-        )
-    } else {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-        Text("AnTier · 原生控件控制 EasyTier 内核", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            "AIDL 服务: ${if (service != null) "已连接" else "未连接"}",
-            style = MaterialTheme.typography.bodyMedium
-        )
-
-        Card {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("网络配置", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "用开关与表单配置实例；高级模式可直接编辑 TOML",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = {
-                        configTab = ConfigTab.WIZARD
-                        showConfig = true
-                    }) {
-                        Text("配置向导")
-                    }
-                    OutlinedButton(onClick = {
-                        configTab = ConfigTab.TOML
-                        showConfig = true
-                    }) {
-                        Text("高级 TOML")
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { viewModel.startNetwork(toml) }) {
-                        Text("启动内核")
-                    }
-                    OutlinedButton(onClick = { viewModel.stopAll() }) {
-                        Text("停止全部")
-                    }
-                    OutlinedButton(onClick = { viewModel.refreshStatus() }) {
-                        Text("刷新状态")
-                    }
-                }
-                OutlinedButton(
-                    onClick = { showSettings = true },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("VPN 全局设置")
-                }
-            }
+    LaunchedEffect(lastError) {
+        lastError?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.consumeLastError()
         }
+    }
 
-        Card {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("实例列表", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "图例: ● 本应用启动　○ 外部 AIDL 启动",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                if (activeTunInstance != null) {
-                    Text(
-                        "VPN (TUN) 已绑定到实例: $activeTunInstance",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("AnTier", style = MaterialTheme.typography.titleLarge) },
+                actions = {
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Default.Settings, contentDescription = "设置")
+                    }
                 }
-                if (instances.isEmpty()) {
-                    Text("暂无运行中的实例", style = MaterialTheme.typography.bodyMedium)
-                } else {
-                    instances.forEach { inst ->
-                        Card {
-                            Column(
-                                Modifier.padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Row(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        inst.name,
-                                        style = MaterialTheme.typography.titleSmall
-                                    )
-                                    Text(
-                                        buildString {
-                                            append(if (inst.origin == InstanceOrigin.LOCAL) "●" else "○")
-                                            append(' ')
-                                            append(
-                                                when {
-                                                    !inst.modeKnown -> "外部实例，模式未知"
-                                                    inst.noTun -> "no-tun (SOCKS5)"
-                                                    else -> "TUN"
-                                                }
-                                            )
-                                        },
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
-                                Text(
-                                    "虚拟 IPv4: ${inst.ipv4 ?: "未分配"}",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                if (inst.noTun) {
-                                    Text(
-                                        if (inst.socks5Endpoint != null) {
-                                            "SOCKS5: ${inst.socks5Endpoint}"
-                                        } else {
-                                            "未配置 socks5_proxy，实例只能被访问"
-                                        },
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                } else {
-                                    Text(
-                                        "代理 CIDR: ${inst.proxyCidrs}",
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
-                                if (!inst.errorMsg.isNullOrEmpty()) {
-                                    Text(
-                                        "error: ${inst.errorMsg}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.error
-                                    )
-                                }
-                                OutlinedButton(
-                                    onClick = { viewModel.stopInstance(inst.name) },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text("停止 ${inst.name}")
-                                }
-                            }
+            )
+        },
+        floatingActionButton = {
+            Column(
+                modifier = Modifier.padding(end = 36.dp, bottom = 24.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                if (anyRunning) {
+                    FloatingActionButton(
+                        onClick = { viewModel.stopAllNetworks() },
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭所有网络")
+                    }
+                }
+                FloatingActionButton(onClick = onCreateNetwork) {
+                    Icon(Icons.Default.Add, contentDescription = "新建网络配置")
+                }
+            }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
+    ) { innerPadding ->
+        Box(Modifier.fillMaxSize().padding(innerPadding)) {
+            val listState = rememberLazyListState()
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, end = 24.dp, top = 8.dp, bottom = 232.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (networks.isEmpty()) {
+                    item {
+                        Box(
+                            Modifier.fillMaxWidth().padding(top = 96.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "还没有网络配置\n点右下角 + 新建一个网络",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 }
-                HorizontalDivider()
-                Text("最近事件: $lastEvent", style = MaterialTheme.typography.bodySmall)
-                lastError?.let {
-                    Text("错误: $it", color = MaterialTheme.colorScheme.error)
+                items(networks, key = { it.id ?: it.name }) { card ->
+                    NetworkCardItem(
+                        card = card,
+                        onOpen = { card.id?.let(onOpenNetwork) },
+                        onToggle = {
+                            if (card.running) {
+                                card.id?.let(viewModel::stopNetwork)
+                                    ?: viewModel.stopNetworkByName(card.name)
+                            } else {
+                                card.id?.let(viewModel::startNetwork)
+                            }
+                        }
+                    )
                 }
-                HorizontalDivider()
-                Text("原始状态:", style = MaterialTheme.typography.titleSmall)
-                Text(statusText, style = MaterialTheme.typography.bodySmall)
             }
         }
+    }
+}
 
-        Card {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("配置服务器（远程托管）", style = MaterialTheme.typography.titleMedium)
-                OutlinedTextField(
-                    value = cfgUrl,
-                    onValueChange = { cfgUrl = it },
-                    label = { Text("服务器 URL") },
-                    modifier = Modifier.fillMaxWidth()
+/** 网络卡片：名称与按钮较大字号；VPN/NO-TUN、内部/外部、本机 IP 分行显示。 */
+@Composable
+private fun NetworkCardItem(
+    card: NetworkCard,
+    onOpen: () -> Unit,
+    onToggle: () -> Unit
+) {
+    Card(onClick = onOpen, modifier = Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    card.name,
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.weight(1f)
                 )
-                OutlinedTextField(
-                    value = machineId,
-                    onValueChange = { machineId = it },
-                    label = { Text("machine id") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        enabled = cfgUrl.isNotBlank() && !cfgConnected,
-                        onClick = { viewModel.startConfigServer(cfgUrl, machineId) }
-                    ) {
-                        Text("连接")
-                    }
-                    OutlinedButton(
-                        enabled = cfgConnected,
-                        onClick = { viewModel.stopConfigServer() }
-                    ) {
-                        Text("断开")
-                    }
+                Spacer(Modifier.width(12.dp))
+                Button(onClick = onToggle) {
+                    Text(
+                        if (card.running) "断开" else "连接",
+                        style = MaterialTheme.typography.titleMedium
+                    )
                 }
-                Text("连接状态: ${if (cfgConnected) "已连接" else "未连接"}")
             }
-        }
+
+            val modeText = buildString {
+                append(if (card.noTun) "NO-TUN" else "VPN")
+                card.socks5Port?.let { append(" (端口 $it)") }
+            }
+            Text(modeText, style = MaterialTheme.typography.bodyLarge)
+
+            Text(
+                when (card.origin) {
+                    CardOrigin.INTERNAL -> "内部"
+                    CardOrigin.EXTERNAL -> "外部"
+                },
+                style = MaterialTheme.typography.bodyLarge
+            )
+
+            Text(
+                card.ipText,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (card.running) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
+
+            card.errorMsg?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
         }
     }
 }

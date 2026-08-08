@@ -11,9 +11,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.antier.core.AnTierVpnService
 import com.antier.core.EasyTierService
-import com.antier.core.IConfigServerEventCallback
 import com.antier.core.IEasyTierService
 import com.antier.core.IEasyTierStatusListener
+import com.antier.core.VpnConflictPolicy
+import com.antier.core.VpnSettingsStore
+import com.antier.app.ui.model.NetworkConfig
+import com.antier.app.ui.store.NetworkStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,7 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-/** 单个实例的运行时信息（来自 collectNetworkInfos 的 JSON）。 */
+/** 单个实例的运行时信息。 */
 data class NetworkInfo(
     val running: Boolean,
     val ipv4: String?,
@@ -31,28 +34,25 @@ data class NetworkInfo(
     val errorMsg: String?
 )
 
-/** 从用户 TOML 中提取的数据面模式提示。 */
+/** 从配置中提取的数据面模式提示。 */
 data class ConfigHints(
     val noTun: Boolean,
     val useSmoltcp: Boolean,
     val socks5Endpoint: String?
 )
 
-/** 界面展示用的实例状态（运行时信息 + 启动时解析到的模式）。 */
-enum class InstanceOrigin { LOCAL, EXTERNAL }
+enum class CardOrigin { INTERNAL, EXTERNAL }
 
-data class InstanceState(
+/** 主界面网络卡片展示数据。 */
+data class NetworkCard(
+    val id: String?,
     val name: String,
     val running: Boolean,
-    val ipv4: String?,
-    val proxyCidrs: List<String>,
-    val errorMsg: String?,
     val noTun: Boolean,
-    val socks5Endpoint: String?,
-    /** 本应用界面启动的还是外部应用通过 AIDL 启动的。 */
-    val origin: InstanceOrigin,
-    /** 是否已拿到该实例的配置（决定模式是否可信）。 */
-    val modeKnown: Boolean
+    val socks5Port: String?,
+    val origin: CardOrigin,
+    val ipText: String,
+    val errorMsg: String?
 )
 
 /** 请求建立 VPN：携带启动 AnTierVpnService 所需的 Intent。 */
@@ -62,10 +62,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val TAG = "MainViewModel"
-        private const val DEFAULT_INSTANCE_NAME = "antier_android"
         private const val IP_WAIT_TIMEOUT_MS = 90_000L
 
-        /** 从用户 TOML 配置中提取与数据面模式相关的设置。 */
         fun parseConfigHints(config: String): ConfigHints {
             val noTun = Regex("""no_tun\s*=\s*true""", RegexOption.IGNORE_CASE)
                 .containsMatchIn(config)
@@ -76,7 +74,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return ConfigHints(noTun, useSmoltcp, socks5Raw?.let(::normalizeSocks5Endpoint))
         }
 
-        /** 把 socks5_proxy 里的绑定地址规范化为客户端可用的 127.0.0.1:<port>。 */
         private fun normalizeSocks5Endpoint(raw: String): String {
             val noScheme = raw.substringAfter("://", raw)
             val port = noScheme.substringAfterLast(':', "").toIntOrNull()
@@ -84,43 +81,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private val app = getApplication<Application>()
+
     private val _service = MutableStateFlow<IEasyTierService?>(null)
     val service: StateFlow<IEasyTierService?> = _service.asStateFlow()
 
-    private val _statusText = MutableStateFlow("")
-    val statusText: StateFlow<String> = _statusText.asStateFlow()
+    private val _networks = MutableStateFlow<List<NetworkCard>>(emptyList())
+    val networks: StateFlow<List<NetworkCard>> = _networks.asStateFlow()
 
-    private val _lastEvent = MutableStateFlow("")
-    val lastEvent: StateFlow<String> = _lastEvent.asStateFlow()
-
-    private val _lastError = MutableStateFlow<String?>(null)
-    val lastError: StateFlow<String?> = _lastError.asStateFlow()
+    private val _activeTunInstance = MutableStateFlow<String?>(null)
+    val activeTunInstance: StateFlow<String?> = _activeTunInstance.asStateFlow()
 
     private val _vpnPrepareRequest = MutableStateFlow<VpnPrepareRequest?>(null)
     val vpnPrepareRequest: StateFlow<VpnPrepareRequest?> = _vpnPrepareRequest.asStateFlow()
 
-    /** 当前所有运行实例的展示状态。 */
-    private val _instances = MutableStateFlow<List<InstanceState>>(emptyList())
-    val instances: StateFlow<List<InstanceState>> = _instances.asStateFlow()
+    private val _lastError = MutableStateFlow<String?>(null)
+    val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
-    /** 当前持有 VpnService TUN 的实例名（同一时间最多一个）。 */
-    private val _activeTunInstance = MutableStateFlow<String?>(null)
-    val activeTunInstance: StateFlow<String?> = _activeTunInstance.asStateFlow()
+    private val _lastEvent = MutableStateFlow("")
+    val lastEvent: StateFlow<String> = _lastEvent.asStateFlow()
 
-    private val _configServerConnected = MutableStateFlow(false)
-    val configServerConnected: StateFlow<Boolean> = _configServerConnected.asStateFlow()
+    /** 运行实例的当前名称列表（refresh 时更新）。 */
+    private var runningNames: List<String> = emptyList()
 
-    /** 本界面启动过的实例的配置提示（refresh 时用于还原模式展示）。 */
+    /** 运行实例的运行时信息缓存（refresh 时更新）。 */
+    private var runningInfo: Map<String, NetworkInfo> = emptyMap()
+
+    /** 本界面启动过的实例的配置提示。 */
     private val hintsByName = mutableMapOf<String, ConfigHints>()
 
-    /** 外部实例通过 JSON-RPC 查到的配置提示缓存（key 为实例名）。 */
+    /** 外部实例通过 JSON-RPC 查到的配置提示缓存。 */
     private val rpcHintsByName = mutableMapOf<String, ConfigHints>()
-
-    private var configServerCallback: IConfigServerEventCallback? = null
 
     private val statusListener = object : IEasyTierStatusListener.Stub() {
         override fun onEvent(eventJson: String?) {
             _lastEvent.value = eventJson ?: ""
+            refreshStatus()
         }
     }
 
@@ -170,70 +166,102 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * 启动一个内核实例。
-     *
-     * - no-tun 实例：不请求 VPN，主动访问走配置里的 SOCKS5；
-     * - TUN 实例：等 DHCP 分配虚拟 IP 后请求 VPN 授权并拉起 VpnService；
-     * - 同时最多允许一个 TUN 实例。
-     */
-    fun startNetwork(config: String) {
+    fun consumeLastError() {
+        _lastError.value = null
+    }
+
+    fun consumeVpnPrepareRequest() {
+        _vpnPrepareRequest.value = null
+    }
+
+    /** 新建网络配置，返回实例 ID 供导航进入编辑页。 */
+    fun createNetwork(): String {
+        val config = NetworkConfig.default()
+        NetworkStore.save(app, config.instanceId, config.toToml())
+        rebuildCards()
+        return config.instanceId
+    }
+
+    fun saveNetwork(id: String, toml: String) {
+        NetworkStore.save(app, id, toml)
+        rebuildCards()
+    }
+
+    fun deleteNetwork(id: String) {
+        val stored = NetworkStore.get(app, id) ?: return
+        if (runningNames.any { it == stored.config.instanceName }) {
+            stopNetworkByName(stored.config.instanceName)
+        }
+        NetworkStore.delete(app, id)
+        rebuildCards()
+    }
+
+    /** 启动指定网络。no-tun 实例可并发；VPN 实例按冲突策略挤占/谦让。 */
+    fun startNetwork(id: String) {
+        val stored = NetworkStore.get(app, id) ?: run {
+            _lastError.value = "网络配置不存在"
+            return
+        }
+        val config = stored.config
+        val name = config.instanceName.ifBlank { "default" }
+        val hints = ConfigHints(
+            noTun = config.flags.noTun,
+            useSmoltcp = config.flags.useSmoltcp,
+            socks5Endpoint = config.socks5Proxy.takeIf { it.isNotBlank() }
+                ?.let(::normalizeSocks5Endpoint)
+        )
+
         viewModelScope.launch {
             val svc = _service.value
             if (svc == null) {
-                _lastError.value = "AIDL service not connected"
+                _lastError.value = "内核服务未连接"
                 return@launch
             }
-            val hints = parseConfigHints(config)
-            val name = parseInstanceName(config) ?: DEFAULT_INSTANCE_NAME
+            if (runningNames.contains(name)) {
+                _lastError.value = "实例 $name 已在运行，请先断开"
+                return@launch
+            }
 
-            val current = _instances.value
-            if (current.any { it.name == name }) {
-                _lastError.value = "实例 $name 已在运行，请先停止"
-                return@launch
-            }
+            // VPN 冲突处理：同时只允许一个 TUN 实例。
             if (!hints.noTun) {
-                val tunOwner = current.firstOrNull { !it.noTun }
-                if (tunOwner != null) {
-                    _lastError.value = "同时只能有一个 TUN 实例，请先停止 ${tunOwner.name}"
-                    return@launch
+                val existingTun = runningNames.firstOrNull { !isNoTunInstance(it) }
+                if (existingTun != null) {
+                    val policy = VpnSettingsStore.load(app).conflictPolicy
+                    when (policy) {
+                        VpnConflictPolicy.FIRST_COMES_FIRST -> {
+                            _lastError.value =
+                                "先行者优先：已有 VPN 网络 $existingTun 在运行，本次连接谦让（未启动）"
+                            return@launch
+                        }
+                        VpnConflictPolicy.LAST_COMES_FIRST -> {
+                            // 后来者优先：挤占，先关闭先启动的 VPN 网络。
+                            stopNetworkInternal(svc, existingTun)
+                        }
+                    }
                 }
             }
 
-            val rc = withContext(Dispatchers.IO) { svc.runNetworkInstance(config) }
+            val rc = withContext(Dispatchers.IO) { svc.runNetworkInstance(stored.toml) }
             if (rc != 0) {
                 _lastError.value = withContext(Dispatchers.IO) { svc.getLastError() }
-                    ?: "runNetworkInstance failed"
+                    ?: "启动失败"
                 return@launch
             }
-
+            hintsByName[name] = hints
             _lastError.value = if (hints.noTun && hints.socks5Endpoint == null) {
-                "no_tun 已启用但未配置 socks5_proxy，实例只能被访问，无法主动连接对端"
+                "no-tun 已启用但未配置 socks5_proxy，实例只能被访问"
             } else {
                 null
             }
-            hintsByName[name] = hints
-            _instances.value = _instances.value + InstanceState(
-                name = name,
-                running = true,
-                ipv4 = null,
-                proxyCidrs = emptyList(),
-                errorMsg = null,
-                noTun = hints.noTun,
-                socks5Endpoint = hints.socks5Endpoint,
-                origin = InstanceOrigin.LOCAL,
-                modeKnown = true
-            )
+            refreshStatus()
 
-            // 等待 DHCP 分配虚拟 IPv4：TUN 模式需要 IP 才能建 VPN；no-tun 模式仅用于展示。
+            // 等待 DHCP 分配虚拟 IPv4：TUN 模式需要 IP 才能建 VPN。
             val deadline = System.currentTimeMillis() + IP_WAIT_TIMEOUT_MS
             while (System.currentTimeMillis() < deadline) {
                 delay(1500)
-                val info = withContext(Dispatchers.IO) { queryInstanceInfo(svc, name) } ?: continue
-                if (!info.running) continue
-                updateInstance(name) {
-                    it.copy(ipv4 = info.ipv4, proxyCidrs = info.proxyCidrs, errorMsg = info.errorMsg)
-                }
+                refreshStatus()
+                val info = runningInfo[name] ?: continue
+                if (!info.running) return@launch
                 if (hints.noTun) return@launch
                 if (!info.ipv4.isNullOrEmpty()) {
                     requestVpn(name, info)
@@ -246,43 +274,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 停止指定实例（保留其余实例），若该实例持有 TUN 则同时关闭 VpnService。 */
-    fun stopInstance(name: String) {
+    /** 断开指定网络（保留其余网络）。 */
+    fun stopNetwork(id: String) {
+        val stored = NetworkStore.get(app, id) ?: return
+        stopNetworkByName(stored.config.instanceName.ifBlank { "default" })
+    }
+
+    fun stopNetworkByName(name: String) {
         viewModelScope.launch {
-            val svc = _service.value
-            if (svc == null) {
-                _lastError.value = "AIDL service not connected"
-                return@launch
-            }
-            val running = withContext(Dispatchers.IO) { svc.listInstances(50) }
-                ?.let(::parseListInstances).orEmpty()
-            val keep = running.filter { it != name }
-            val rc = withContext(Dispatchers.IO) {
-                svc.retainNetworkInstance(keep.toTypedArray())
-            }
-            if (rc != 0) {
-                _lastError.value = withContext(Dispatchers.IO) { svc.getLastError() }
-                    ?: "retainNetworkInstance failed"
-                return@launch
-            }
-            hintsByName.remove(name)
-            rpcHintsByName.remove(name)
-            if (_activeTunInstance.value == name) {
-                getApplication<Application>().stopService(
-                    Intent(getApplication(), AnTierVpnService::class.java)
-                )
-                _activeTunInstance.value = null
-            }
+            val svc = _service.value ?: return@launch
+            stopNetworkInternal(svc, name)
             refreshStatus()
         }
     }
 
-    /** 停止全部实例并关闭 VpnService。 */
-    fun stopAll() {
+    private suspend fun stopNetworkInternal(svc: IEasyTierService, name: String) {
+        val keep = runningNames.filter { it != name }
+        val rc = withContext(Dispatchers.IO) {
+            svc.retainNetworkInstance(keep.toTypedArray())
+        }
+        if (rc != 0) {
+            _lastError.value = withContext(Dispatchers.IO) { svc.getLastError() }
+                ?: "断开失败"
+            return
+        }
+        hintsByName.remove(name)
+        rpcHintsByName.remove(name)
+        if (_activeTunInstance.value == name) {
+            app.stopService(Intent(app, AnTierVpnService::class.java))
+            _activeTunInstance.value = null
+        }
+    }
+
+    /** 关闭所有网络并关闭 VPN。 */
+    fun stopAllNetworks() {
         viewModelScope.launch {
-            getApplication<Application>().stopService(
-                Intent(getApplication(), AnTierVpnService::class.java)
-            )
+            app.stopService(Intent(app, AnTierVpnService::class.java))
             _activeTunInstance.value = null
             val svc = _service.value
             if (svc != null) {
@@ -290,116 +317,57 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             hintsByName.clear()
             rpcHintsByName.clear()
-            _instances.value = emptyList()
             refreshStatus()
         }
     }
 
+    /** 刷新运行实例并重建主界面卡片。 */
     fun refreshStatus() {
         viewModelScope.launch {
-            val svc = _service.value ?: run {
-                _statusText.value = "service not connected"
-                return@launch
-            }
+            val svc = _service.value ?: return@launch
             val instancesJson = withContext(Dispatchers.IO) { svc.listInstances(50) }
             val infosJson = withContext(Dispatchers.IO) { svc.collectNetworkInfos(50) }
-            _statusText.value = buildString {
-                append("instances: ").append(instancesJson ?: "null").append('\n')
-                append("infos: ").append(infosJson ?: "null")
-            }
 
-            val runningNames = instancesJson?.let(::parseListInstances).orEmpty()
-            val infos = infosJson?.let(::parseAllNetworkInfos).orEmpty()
+            runningNames = instancesJson?.let(::parseListInstances).orEmpty()
+            runningInfo = infosJson?.let(::parseAllNetworkInfos).orEmpty()
 
-            // 外部实例没有本地 hints，通过 JSON-RPC 拉取配置，确认其 no-tun/SOCKS5 模式。
+            // 外部实例通过 JSON-RPC 拉取配置，确认 no-tun/SOCKS5 模式。
             rpcHintsByName.keys.retainAll(runningNames)
-            val externalNames = runningNames.filter { it !in hintsByName && it !in rpcHintsByName }
+            val externalNames = runningNames.filter {
+                it !in hintsByName && it !in rpcHintsByName
+            }
             for (name in externalNames) {
                 val hints = withContext(Dispatchers.IO) { fetchConfigHints(svc, name) }
                 if (hints != null) rpcHintsByName[name] = hints
             }
 
-            _instances.value = runningNames.map { name ->
-                val local = hintsByName.containsKey(name)
-                val hints = if (local) hintsByName[name] else rpcHintsByName[name]
-                val info = infos[name]
-                InstanceState(
-                    name = name,
-                    running = true,
-                    ipv4 = info?.ipv4,
-                    proxyCidrs = info?.proxyCidrs ?: emptyList(),
-                    errorMsg = info?.errorMsg,
-                    noTun = hints?.noTun ?: false,
-                    socks5Endpoint = hints?.socks5Endpoint,
-                    origin = if (local) InstanceOrigin.LOCAL else InstanceOrigin.EXTERNAL,
-                    modeKnown = hints != null
-                )
-            }
-
-            val active = _activeTunInstance.value
-            if (active != null && active !in runningNames) {
+            if (_activeTunInstance.value != null &&
+                _activeTunInstance.value !in runningNames
+            ) {
                 _activeTunInstance.value = null
-                getApplication<Application>().stopService(
-                    Intent(getApplication(), AnTierVpnService::class.java)
-                )
+                app.stopService(Intent(app, AnTierVpnService::class.java))
             }
+            rebuildCards()
         }
     }
 
-    fun startConfigServer(url: String, machineId: String) {
-        viewModelScope.launch {
-            val svc = _service.value ?: return@launch
-            val callback = object : IConfigServerEventCallback.Stub() {
-                override fun onEvent(eventJson: String?) {
-                    _lastEvent.value = "cfg: ${eventJson ?: ""}"
-                }
-            }
-            configServerCallback = callback
-            val rc = withContext(Dispatchers.IO) {
-                svc.startConfigServerClient(url, null, machineId, false, callback)
-            }
-            if (rc == 0) {
-                _configServerConnected.value =
-                    withContext(Dispatchers.IO) { svc.isConfigServerClientConnected() }
-                _lastError.value = null
-            } else {
-                _lastError.value =
-                    withContext(Dispatchers.IO) { svc.getLastError() } ?: "config server start failed"
-            }
-        }
-    }
-
-    fun stopConfigServer() {
-        viewModelScope.launch {
-            val svc = _service.value ?: return@launch
-            withContext(Dispatchers.IO) { svc.stopConfigServerClient() }
-            _configServerConnected.value =
-                withContext(Dispatchers.IO) { svc.isConfigServerClientConnected() }
-        }
-    }
-
-    /** 用户授权 VPN 后启动 VpnService，并记录它绑定到了哪个实例。 */
     fun onVpnGranted() {
         val request = _vpnPrepareRequest.value ?: return
         val instanceName = request.serviceIntent.getStringExtra(AnTierVpnService.EXTRA_INSTANCE_NAME)
         try {
-            getApplication<Application>().startService(request.serviceIntent)
+            app.startService(request.serviceIntent)
             if (instanceName != null) _activeTunInstance.value = instanceName
         } catch (e: Exception) {
-            _lastError.value = "start vpn service failed: ${e.message}"
+            _lastError.value = "启动 VPN 服务失败：${e.message}"
         }
     }
 
     fun onVpnDenied() {
-        _lastError.value = "vpn permission denied，实例仍在内核中运行（无 TUN 数据面）"
-    }
-
-    fun consumeVpnPrepareRequest() {
-        _vpnPrepareRequest.value = null
+        _lastError.value = "VPN 授权被拒绝，实例仍在内核中运行（无 TUN 数据面）"
     }
 
     private fun requestVpn(name: String, info: NetworkInfo) {
-        val intent = Intent(getApplication(), AnTierVpnService::class.java).apply {
+        val intent = Intent(app, AnTierVpnService::class.java).apply {
             putExtra(AnTierVpnService.EXTRA_IPV4, info.ipv4)
             putStringArrayListExtra(
                 AnTierVpnService.EXTRA_PROXY_CIDRS,
@@ -410,21 +378,68 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _vpnPrepareRequest.value = VpnPrepareRequest(intent)
     }
 
-    private fun updateInstance(name: String, transform: (InstanceState) -> InstanceState) {
-        _instances.value = _instances.value.map { if (it.name == name) transform(it) else it }
+    private fun rebuildCards() {
+        val saved = NetworkStore.loadAll(app)
+        val savedNames = saved.map { it.config.instanceName }.toSet()
+        val cards = mutableListOf<NetworkCard>()
+
+        saved.forEach { stored ->
+            val config = stored.config
+            val name = config.instanceName.ifBlank { "default" }
+            val info = runningInfo[name]
+            val running = runningNames.contains(name)
+            cards.add(
+                NetworkCard(
+                    id = stored.id,
+                    name = config.displayName,
+                    running = running,
+                    noTun = config.flags.noTun,
+                    socks5Port = socks5Port(config.socks5Proxy),
+                    origin = CardOrigin.INTERNAL,
+                    ipText = when {
+                        running && !info?.ipv4.isNullOrEmpty() ->
+                            "${info?.ipv4}/${ipv4PrefixLen(config.ipv4)}"
+                        !running && config.ipv4WithPrefix.isNotBlank() -> config.ipv4WithPrefix
+                        else -> "未连接"
+                    },
+                    errorMsg = if (running) info?.errorMsg else null
+                )
+            )
+        }
+
+        runningNames.filterNot { it in savedNames }.forEach { name ->
+            val hints = hintsByName[name] ?: rpcHintsByName[name]
+            val info = runningInfo[name]
+            cards.add(
+                NetworkCard(
+                    id = null,
+                    name = name,
+                    running = true,
+                    noTun = hints?.noTun ?: false,
+                    socks5Port = hints?.socks5Endpoint?.substringAfterLast(':'),
+                    origin = CardOrigin.EXTERNAL,
+                    ipText = info?.ipv4?.let { "$it/24" } ?: "未连接",
+                    errorMsg = info?.errorMsg
+                )
+            )
+        }
+
+        _networks.value = cards
     }
 
-    private suspend fun queryInstanceInfo(svc: IEasyTierService, name: String): NetworkInfo? {
-        val json = svc.collectNetworkInfos(50) ?: return null
-        return parseNetworkInfo(json, name)
+    private fun isNoTunInstance(name: String): Boolean =
+        hintsByName[name]?.noTun ?: rpcHintsByName[name]?.noTun ?: false
+
+    private fun socks5Port(socks5Proxy: String): String? {
+        if (socks5Proxy.isBlank()) return null
+        return Regex("""(?::)(\d+)\s*$""").find(socks5Proxy)?.groupValues?.get(1)
     }
 
-    private fun parseInstanceName(config: String): String? {
-        return Regex("""(?:inst_name|instance_name)\s*=\s*"([^"]+)"""")
-            .find(config)?.groupValues?.get(1)
+    private fun ipv4PrefixLen(ipv4: String): String {
+        val idx = ipv4.indexOf('/')
+        return if (idx >= 0) ipv4.substring(idx + 1) else "24"
     }
 
-    /** listInstances 返回 {实例名: 实例ID}，取所有键。 */
     private fun parseListInstances(json: String): List<String> {
         return try {
             val root = JSONObject(json)
@@ -438,7 +453,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** collectNetworkInfos 返回 map，解析所有实例的运行时信息。 */
     private fun parseAllNetworkInfos(json: String): Map<String, NetworkInfo> {
         return try {
             val root = JSONObject(json)
@@ -456,11 +470,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * 通过 JSON-RPC 拉取实例配置，提取 no-tun/SOCKS5 模式。
-     * 对 FFI 暴露的 api.config.ConfigRpcService.get_config 有效，
-     * 外部 AIDL 启动的实例同样适用。
-     */
     private suspend fun fetchConfigHints(svc: IEasyTierService, name: String): ConfigHints? {
         val payload = JSONObject()
             .put("instance", JSONObject().put("instance_selector", JSONObject().put("name", name)))

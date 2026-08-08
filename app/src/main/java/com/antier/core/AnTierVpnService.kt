@@ -2,7 +2,6 @@ package com.antier.core
 
 import android.content.Intent
 import android.net.VpnService
-import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.easytier.jni.EasyTierJNI
@@ -11,8 +10,12 @@ import kotlin.concurrent.thread
 /**
  * 本应用的 VpnService：创建 TUN 接口，把 fd 交给已运行的 EasyTier 实例。
  *
- * 由界面在拿到 DHCP 分配的虚拟 IP 与代理路由后启动；
- * 第三方应用则通过 AIDL [IEasyTierService.setTunFd] 传入自己的 TUN fd。
+ * 包级连接逻辑（VpnSettings）：
+ * - 本应用自身始终绕过 VPN（避免 AIDL/内核 socket 环路）。
+ * - 连接逻辑为“关闭虚拟网段，提供其他网络”的包：绕过 VPN。
+ * - 其余包（使用虚拟网段）：进入 VPN。
+ * - 只要存在“使用虚拟网段，提供其他网络”的包或默认配置，就附加 0.0.0.0/0
+ *   路由（其它网络经出口节点访问）；否则仅路由虚拟网段与代理子网。
  */
 class AnTierVpnService : VpnService() {
 
@@ -84,63 +87,47 @@ class AnTierVpnService : VpnService() {
         cleanup()
     }
 
-    /**
-     * 应用可见性：决定哪些应用走 VPN。
-     *
-     * AnTier 自身始终绕过 VPN（不进入 TUN），否则 AIDL 与内核的
-     * peer socket 会被路由进虚拟网，造成环路。
-     */
     private fun applyAppVisibility(builder: Builder, settings: VpnSettings) {
-        when (settings.appMode) {
-            VpnAppMode.ALL -> {
-                builder.addDisallowedApplication(packageName)
+        // 本应用自身始终绕过 VPN。
+        runCatching { builder.addDisallowedApplication(packageName) }
+            .onFailure { Log.w(TAG, "disallow self failed", it) }
+
+        val records = settings.packageRecords.associateBy { it.packageName }
+        fun modeOf(pkg: String) = records[pkg]?.mode ?: settings.defaultPackageMode
+
+        val allPackages = runCatching {
+            packageManager.getInstalledApplications(0).map { it.packageName }
+        }.getOrDefault(emptyList())
+
+        allPackages
+            .filter { it != packageName && modeOf(it) == PackageConnectionMode.NO_VNET_PROVIDE_OTHERS }
+            .forEach { pkg ->
+                runCatching { builder.addDisallowedApplication(pkg) }
+                    .onFailure { Log.w(TAG, "disallow $pkg failed", it) }
             }
-            VpnAppMode.DENY_LIST -> {
-                builder.addDisallowedApplication(packageName)
-                settings.deniedPackages.forEach { pkg ->
-                    runCatching { builder.addDisallowedApplication(pkg) }
-                        .onFailure { Log.w(TAG, "deny $pkg failed", it) }
-                }
-            }
-            VpnAppMode.ALLOW_LIST -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    // 白名单：只允许列出的应用走 VPN；AnTier 自身不在列表里，自动走原网络。
-                    settings.allowedPackages
-                        .filter { it != packageName }
-                        .forEach { pkg ->
-                            runCatching { builder.addAllowedApplication(pkg) }
-                                .onFailure { Log.w(TAG, "allow $pkg failed", it) }
-                        }
-                } else {
-                    // Android 14 以下没有白名单 API，退回"所有应用可用"。
-                    Log.w(TAG, "allow-list mode requires API 34+, falling back to ALL")
-                    builder.addDisallowedApplication(packageName)
-                }
-            }
-        }
     }
 
-    /** 路由模式：仅虚拟网络，或全流量（虚拟网络 + 互联网）。 */
     private fun applyRouting(
         builder: Builder,
         settings: VpnSettings,
         proxyCidrs: List<String>
     ) {
-        when (settings.routingMode) {
-            VpnRoutingMode.VIRTUAL_ONLY -> {
-                for (cidr in proxyCidrs) {
-                    try {
-                        val (routeIp, routeLength) = parseAddress(cidr, -1)
-                        builder.addRoute(routeIp, routeLength)
-                        Log.d(TAG, "add route: $routeIp/$routeLength")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "invalid cidr: $cidr", e)
-                    }
+        val providesOthers =
+            settings.packageRecords.any { it.mode == PackageConnectionMode.USE_VNET_PROVIDE_OTHERS } ||
+                settings.defaultPackageMode == PackageConnectionMode.USE_VNET_PROVIDE_OTHERS
+
+        if (providesOthers) {
+            builder.addRoute("0.0.0.0", 0)
+            Log.d(TAG, "provide other networks: route 0.0.0.0/0")
+        } else {
+            for (cidr in proxyCidrs) {
+                try {
+                    val (routeIp, routeLength) = parseAddress(cidr, -1)
+                    builder.addRoute(routeIp, routeLength)
+                    Log.d(TAG, "add route: $routeIp/$routeLength")
+                } catch (e: Exception) {
+                    Log.w(TAG, "invalid cidr: $cidr", e)
                 }
-            }
-            VpnRoutingMode.FULL_TUNNEL -> {
-                builder.addRoute("0.0.0.0", 0)
-                Log.d(TAG, "full tunnel: 0.0.0.0/0")
             }
         }
     }
