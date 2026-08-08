@@ -30,20 +30,24 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.antier.app.ui.MainViewModel
 
 private val DEFAULT_CONFIG = """
-    inst_name = "antier_android"
-    network = "antier_demo_net"
-    network_secret = "antier_demo_secret"
+    instance_name = "antier_android"
     hostname = "antier-android"
     listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
-    enable_encryption = true
-    mtu = 1380
-    log_level = "info"
 
-    # no-tun 模式（不开 VPN，走 SOCKS5）：取消下面三行注释即可
-    # socks5_proxy = "socks5://127.0.0.1:12333"
-    # [flags]
-    # no_tun = true
-    # use_smoltcp = true
+    [network_identity]
+    network_name = "antier_demo_net"
+    network_secret = "antier_demo_secret"
+
+    [flags]
+    enable_encryption = true
+    enable_ipv6 = true
+    mtu = 1380
+    no_tun = false
+    use_smoltcp = false
+    enable_exit_node = false
+
+    [console_logger]
+    level = "info"
 """.trimIndent()
 
 @Composable
@@ -52,6 +56,8 @@ fun HomeScreen(viewModel: MainViewModel = viewModel()) {
     var cfgUrl by rememberSaveable { mutableStateOf("") }
     var machineId by rememberSaveable { mutableStateOf("android-device") }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showConfig by rememberSaveable { mutableStateOf(false) }
+    var configTab by rememberSaveable { mutableStateOf(ConfigTab.WIZARD) }
 
     val service by viewModel.service.collectAsState()
     val statusText by viewModel.statusText.collectAsState()
@@ -63,6 +69,16 @@ fun HomeScreen(viewModel: MainViewModel = viewModel()) {
 
     if (showSettings) {
         VpnSettingsScreen(onBack = { showSettings = false })
+    } else if (showConfig) {
+        NetworkConfigScreen(
+            initialToml = toml,
+            initialTab = configTab,
+            onBack = { showConfig = false },
+            onApply = { newToml ->
+                toml = newToml
+                showConfig = false
+            }
+        )
     } else {
         Column(
             modifier = Modifier
@@ -79,15 +95,25 @@ fun HomeScreen(viewModel: MainViewModel = viewModel()) {
 
         Card {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("TOML 配置", style = MaterialTheme.typography.titleMedium)
-                OutlinedTextField(
-                    value = toml,
-                    onValueChange = { toml = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(220.dp),
-                    minLines = 10
+                Text("网络配置", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "用开关与表单配置实例；高级模式可直接编辑 TOML",
+                    style = MaterialTheme.typography.bodySmall
                 )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        configTab = ConfigTab.WIZARD
+                        showConfig = true
+                    }) {
+                        Text("配置向导")
+                    }
+                    OutlinedButton(onClick = {
+                        configTab = ConfigTab.TOML
+                        showConfig = true
+                    }) {
+                        Text("高级 TOML")
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { viewModel.startNetwork(toml) }) {
                         Text("启动内核")

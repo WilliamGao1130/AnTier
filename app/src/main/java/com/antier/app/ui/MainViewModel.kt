@@ -420,7 +420,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun parseInstanceName(config: String): String? {
-        return Regex("""inst_name\s*=\s*"([^"]+)"""").find(config)?.groupValues?.get(1)
+        return Regex("""(?:inst_name|instance_name)\s*=\s*"([^"]+)"""")
+            .find(config)?.groupValues?.get(1)
     }
 
     /** listInstances 返回 {实例名: 实例ID}，取所有键。 */
