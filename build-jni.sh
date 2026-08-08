@@ -19,6 +19,8 @@ EASYTIER_DIR="${EASYTIER_DIR:-$PROJECT_ROOT/.third_party/easytier}"
 # EasyTier main 分支存在未使用导入/死代码等警告。若环境注入了
 # RUSTFLAGS=-D warnings（如部分 CI 工具链默认行为），这些警告会直接
 # 导致编译失败。这里仅移除该开关，警告仍会以默认 warn 级别输出。
+# 脚本启用了 set -u，变量未设置时先给默认空值再做替换。
+RUSTFLAGS="${RUSTFLAGS:-}"
 export RUSTFLAGS="${RUSTFLAGS//-D warnings/}"
 
 declare -A TARGET_MAP
