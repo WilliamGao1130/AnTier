@@ -11,6 +11,16 @@ on:
         description: 'EasyTier 源码引用（main 分支或 commit/tag）'
         required: false
         default: 'main'
+  workflow_call:
+    inputs:
+      abis:
+        type: string
+        required: false
+        default: 'arm64-v8a x86_64'
+      easy_tier_ref:
+        type: string
+        required: false
+        default: 'main'
   push:
     branches: [ main, master ]
     paths:
@@ -37,7 +47,7 @@ jobs:
       - name: Resolve ABI list
         id: abis
         run: |
-          ABIS="${{ github.event.inputs.abis }}"
+          ABIS="${{ inputs.abis }}"
           if [ -z "$ABIS" ]; then
             ABIS="arm64-v8a x86_64"
           fi
@@ -85,9 +95,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Prepare EasyTier source at pinned ref
-        if: github.event.inputs.easy_tier_ref != '' && github.event.inputs.easy_tier_ref != 'main'
+        if: inputs.easy_tier_ref != '' && inputs.easy_tier_ref != 'main'
         run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.easy_tier_ref }}" \
+          git clone --depth 1 --branch "${{ inputs.easy_tier_ref }}" \
             https://github.com/EasyTier/EasyTier.git .third_party/easytier
 
       - name: Remove stale local.properties
