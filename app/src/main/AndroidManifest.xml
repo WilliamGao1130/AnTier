@@ -39,6 +39,11 @@
         <service
             android:name=".core.AnTierVpnService"
             android:exported="false"
-            android:permission="android.permission.BIND_VPN_SERVICE" />
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <!-- 标准 VPN 服务声明：系统 VPN 列表/Always-on 依赖此 intent-filter -->
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

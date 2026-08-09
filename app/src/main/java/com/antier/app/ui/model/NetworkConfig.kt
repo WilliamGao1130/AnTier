@@ -211,54 +211,70 @@ data class NetworkConfig(
             }
         }
 
+        // 与官方 dump 行为一致：只写出与内核默认值不同的 flags。
+        // 枚举（data_compress_algo）必须使用 proto 原始名（None/Zstd），
+        // 小写 "none" 会导致内核 serde 解析失败。
         append("\n[flags]\n")
         val f = flags
-        append("default_protocol = \"${esc(f.defaultProtocol)}\"\n")
-        if (f.devName.isNotBlank()) append("dev_name = \"${esc(f.devName)}\"\n")
-        append("enable_encryption = ${f.enableEncryption}\n")
-        append("enable_ipv6 = ${f.enableIpv6}\n")
-        if (f.mtu.isNotBlank()) append("mtu = ${f.mtu}\n")
-        append("latency_first = ${f.latencyFirst}\n")
-        append("enable_exit_node = ${f.enableExitNode}\n")
-        append("no_tun = ${f.noTun}\n")
-        append("use_smoltcp = ${f.useSmoltcp}\n")
-        append("relay_network_whitelist = \"${esc(f.relayNetworkWhitelist)}\"\n")
-        append("disable_p2p = ${f.disableP2p}\n")
-        append("p2p_only = ${f.p2pOnly}\n")
-        append("lazy_p2p = ${f.lazyP2p}\n")
-        append("relay_all_peer_rpc = ${f.relayAllPeerRpc}\n")
-        append("disable_tcp_hole_punching = ${f.disableTcpHolePunching}\n")
-        append("disable_udp_hole_punching = ${f.disableUdpHolePunching}\n")
-        append("multi_thread = ${f.multiThread}\n")
-        append("data_compress_algo = \"${esc(f.dataCompressAlgo)}\"\n")
-        append("bind_device = ${f.bindDevice}\n")
-        append("enable_kcp_proxy = ${f.enableKcpProxy}\n")
-        append("disable_kcp_input = ${f.disableKcpInput}\n")
-        append("disable_relay_kcp = ${f.disableRelayKcp}\n")
-        append("proxy_forward_by_system = ${f.proxyForwardBySystem}\n")
-        append("accept_dns = ${f.acceptDns}\n")
-        append("private_mode = ${f.privateMode}\n")
-        append("enable_quic_proxy = ${f.enableQuicProxy}\n")
-        append("disable_quic_input = ${f.disableQuicInput}\n")
-        append("disable_relay_quic = ${f.disableRelayQuic}\n")
-        if (f.quicListenPort.isNotBlank()) append("quic_listen_port = ${f.quicListenPort}\n")
-        if (f.foreignRelayBpsLimit.isNotBlank()) {
-            append("foreign_relay_bps_limit = ${f.foreignRelayBpsLimit}\n")
+
+        fun bool(name: String, value: Boolean, def: Boolean) {
+            if (value != def) append("$name = $value\n")
         }
-        append("multi_thread_count = ${f.multiThreadCount.ifBlank { "2" }}\n")
-        append("enable_relay_foreign_network_kcp = ${f.enableRelayForeignNetworkKcp}\n")
-        append("enable_relay_foreign_network_quic = ${f.enableRelayForeignNetworkQuic}\n")
-        append("encryption_algorithm = \"${esc(f.encryptionAlgorithm)}\"\n")
-        append("disable_sym_hole_punching = ${f.disableSymHolePunching}\n")
-        append("tld_dns_zone = \"${esc(f.tldDnsZone)}\"\n")
-        append("need_p2p = ${f.needP2p}\n")
-        if (f.instanceRecvBpsLimit.isNotBlank()) {
-            append("instance_recv_bps_limit = ${f.instanceRecvBpsLimit}\n")
+
+        fun str(name: String, value: String, def: String) {
+            if (value != def && value.isNotBlank()) append("$name = \"${esc(value)}\"\n")
         }
-        append("disable_upnp = ${f.disableUpnp}\n")
-        append("disable_relay_data = ${f.disableRelayData}\n")
-        append("enable_udp_broadcast_relay = ${f.enableUdpBroadcastRelay}\n")
-        if (f.socketMark.isNotBlank()) append("socket_mark = ${f.socketMark}\n")
+
+        fun num(name: String, value: String, def: String) {
+            if (value.isNotBlank() && value != def) append("$name = $value\n")
+        }
+
+        str("default_protocol", f.defaultProtocol, "tcp")
+        str("dev_name", f.devName, "")
+        bool("enable_encryption", f.enableEncryption, true)
+        bool("enable_ipv6", f.enableIpv6, true)
+        num("mtu", f.mtu, "1380")
+        bool("latency_first", f.latencyFirst, false)
+        bool("enable_exit_node", f.enableExitNode, false)
+        bool("no_tun", f.noTun, false)
+        bool("use_smoltcp", f.useSmoltcp, false)
+        str("relay_network_whitelist", f.relayNetworkWhitelist, "*")
+        bool("disable_p2p", f.disableP2p, false)
+        bool("p2p_only", f.p2pOnly, false)
+        bool("lazy_p2p", f.lazyP2p, false)
+        bool("relay_all_peer_rpc", f.relayAllPeerRpc, false)
+        bool("disable_tcp_hole_punching", f.disableTcpHolePunching, false)
+        bool("disable_udp_hole_punching", f.disableUdpHolePunching, false)
+        bool("multi_thread", f.multiThread, true)
+        if (f.dataCompressAlgo != "none") {
+            append("data_compress_algo = \"${esc(compressAlgo(f.dataCompressAlgo))}\"\n")
+        }
+        bool("bind_device", f.bindDevice, true)
+        bool("enable_kcp_proxy", f.enableKcpProxy, false)
+        bool("disable_kcp_input", f.disableKcpInput, false)
+        bool("disable_relay_kcp", f.disableRelayKcp, false)
+        bool("proxy_forward_by_system", f.proxyForwardBySystem, false)
+        bool("accept_dns", f.acceptDns, false)
+        bool("private_mode", f.privateMode, false)
+        bool("enable_quic_proxy", f.enableQuicProxy, false)
+        bool("disable_quic_input", f.disableQuicInput, false)
+        bool("disable_relay_quic", f.disableRelayQuic, false)
+        num("quic_listen_port", f.quicListenPort, "")
+        num("foreign_relay_bps_limit", f.foreignRelayBpsLimit, "")
+        num("multi_thread_count", f.multiThreadCount, "2")
+        bool("enable_relay_foreign_network_kcp", f.enableRelayForeignNetworkKcp, false)
+        bool("enable_relay_foreign_network_quic", f.enableRelayForeignNetworkQuic, false)
+        if (f.encryptionAlgorithm != "aes-gcm") {
+            append("encryption_algorithm = \"${esc(f.encryptionAlgorithm)}\"\n")
+        }
+        bool("disable_sym_hole_punching", f.disableSymHolePunching, false)
+        str("tld_dns_zone", f.tldDnsZone, "et.net.")
+        bool("need_p2p", f.needP2p, false)
+        num("instance_recv_bps_limit", f.instanceRecvBpsLimit, "")
+        bool("disable_upnp", f.disableUpnp, false)
+        bool("disable_relay_data", f.disableRelayData, false)
+        bool("enable_udp_broadcast_relay", f.enableUdpBroadcastRelay, false)
+        num("socket_mark", f.socketMark, "")
 
         if (aclToml.isNotBlank()) {
             append("\n").append(aclToml.trim()).append('\n')
@@ -413,7 +429,9 @@ data class NetworkConfig(
                     disableTcpHolePunching = flagBool("disable_tcp_hole_punching", false),
                     disableUdpHolePunching = flagBool("disable_udp_hole_punching", false),
                     multiThread = flagBool("multi_thread", true),
-                    dataCompressAlgo = flagStr("data_compress_algo", "none"),
+                    dataCompressAlgo = normalizeCompressAlgo(
+                        flagStr("data_compress_algo", "none")
+                    ),
                     bindDevice = flagBool("bind_device", true),
                     enableKcpProxy = flagBool("enable_kcp_proxy", false),
                     disableKcpInput = flagBool("disable_kcp_input", false),
@@ -456,5 +474,20 @@ data class NetworkConfig(
 
         private fun tomlStringArray(values: List<String>): String =
             values.joinToString(", ", prefix = "[", postfix = "]") { "\"${esc(it)}\"" }
+
+        /** 表单里用的小写值 -> pbjson 要求的 proto 原始名。 */
+        private fun compressAlgo(value: String): String = when (value.trim().lowercase()) {
+            "none" -> "None"
+            "zstd" -> "Zstd"
+            "invalid" -> "Invalid"
+            else -> value
+        }
+
+        /** proto 原始名 -> 表单里的小写值。 */
+        private fun normalizeCompressAlgo(value: String): String = when (value.trim().lowercase()) {
+            "none", "invalid" -> value.trim().lowercase()
+            "zstd" -> "zstd"
+            else -> value
+        }
     }
 }

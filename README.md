@@ -44,6 +44,10 @@ export ANTHER_KEYSTORE_FILE=/path/to/antier-release.jks \
 ./gradlew :app:assembleRelease
 ```
 
+## VPN 与系统设置
+
+应用在“系统设置 → 网络 → VPN”中可见的前提是**至少授权过一次 VPN 权限**（首次连接时系统弹窗）。AnTierVpnService 已声明标准的 `android.net.VpnService` intent-filter，授权后即可在系统 VPN 列表显示，并支持 Always-on。
+
 ## 架构
 
 ```text
