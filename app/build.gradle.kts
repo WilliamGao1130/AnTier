@@ -4,6 +4,19 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+/**
+ * 稳定签名：从环境变量读取 keystore 信息。
+ * CI 中由 GitHub Secrets 注入（ANTHER_KEYSTORE_BASE64 解码后给出文件路径），
+ * 本地可用 export ANTHER_KEYSTORE_FILE=... 等变量复用同一把密钥。
+ * 未配置时回退为：debug 用本机 debug 密钥，release 不签名（与原行为一致）。
+ */
+val signingConfigured = listOf(
+    "ANTHER_KEYSTORE_FILE",
+    "ANTHER_KEYSTORE_PASSWORD",
+    "ANTHER_KEY_ALIAS",
+    "ANTHER_KEY_PASSWORD"
+).all { !System.getenv(it).isNullOrBlank() }
+
 android {
     namespace = "com.antier"
     compileSdk = 35
@@ -16,13 +29,34 @@ android {
         versionName = "1.1.1"
     }
 
+    signingConfigs {
+        create("release") {
+            if (signingConfigured) {
+                storeFile = file(System.getenv("ANTHER_KEYSTORE_FILE")!!)
+                storePassword = System.getenv("ANTHER_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANTHER_KEY_ALIAS")
+                keyPassword = System.getenv("ANTHER_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            // CI 配置了稳定签名时，debug 包也使用同一把密钥，
+            // 保证测试包与发布包可互相覆盖安装。
+            if (signingConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (signingConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

@@ -11,6 +11,39 @@
 
 连接逻辑说明：Android VpnService 只能按包允许/绕过，三种连接逻辑中“关闭虚拟网段，提供其他网络”的包绕过 VPN，其余进入 VPN；“提供其他网络”时会话附加 0.0.0.0/0 路由，否则仅路由虚拟网段与代理子网。
 
+## 发布签名（保持包签名不变）
+
+Android 覆盖安装要求新旧 APK 使用**同一把签名密钥**。CI 的 debug 包用的是 runner 临时生成的 debug 密钥（每次构建都不同），release 包默认不签名，因此直接分发时无法覆盖安装，只能卸载重装。
+
+要固定签名，请一次性生成 keystore 并在 GitHub 配置 4 个 Actions Secrets：
+
+```bash
+# 本地生成（保存好此文件与口令，丢失后无法再发布同签名的更新）
+keytool -genkeypair -v -keystore antier-release.jks \
+  -alias antier -keyalg RSA -keysize 2048 -validity 10000
+# macOS 取 base64；Linux 用 base64 -w0 antier-release.jks
+base64 -i antier-release.jks
+```
+
+在仓库 Settings → Secrets and variables → Actions 中新增：
+
+| Secret 名称 | 值 |
+|---|---|
+| `ANTHER_KEYSTORE_BASE64` | keystore 文件的 base64 文本 |
+| `ANTHER_KEYSTORE_PASSWORD` | keystore 口令 |
+| `ANTHER_KEY_ALIAS` | 别名（如上例 `antier`） |
+| `ANTHER_KEY_PASSWORD` | 密钥口令 |
+
+CI 检测到这些 Secret 后会用同一把密钥签名 debug 与 release APK（产物 `app-release.apk`）；未配置时保持原行为（debug 临时签名 / release 不签名）。
+
+注意：如果设备上已安装的是旧密钥签名的 APK，第一次切换签名时仍需卸载一次；此后同密钥产出的所有 APK 均可直接覆盖安装。本地复现同一签名：
+
+```bash
+export ANTHER_KEYSTORE_FILE=/path/to/antier-release.jks \
+       ANTHER_KEYSTORE_PASSWORD=... ANTHER_KEY_ALIAS=antier ANTHER_KEY_PASSWORD=...
+./gradlew :app:assembleRelease
+```
+
 ## 架构
 
 ```text
