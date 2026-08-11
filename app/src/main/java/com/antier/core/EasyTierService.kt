@@ -11,7 +11,6 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.easytier.jni.EasyTierJNI
-import com.easytier.jni.ConfigServerEventCallback
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -118,15 +117,6 @@ class EasyTierService : Service() {
             }
         }
 
-        override fun listInstances(maxLength: Int): String? {
-            return try {
-                EasyTierJNI.listInstances(maxLength)
-            } catch (t: Throwable) {
-                Log.e(TAG, "listInstances failed", t)
-                null
-            }
-        }
-
         override fun collectNetworkInfos(maxLength: Int): String? {
             return try {
                 EasyTierJNI.collectNetworkInfos(maxLength)
@@ -136,65 +126,11 @@ class EasyTierService : Service() {
             }
         }
 
-        override fun callJsonRpc(
-            serviceName: String?,
-            methodName: String?,
-            domainName: String?,
-            payloadJson: String?
-        ): String? {
-            if (serviceName == null || methodName == null || payloadJson == null) return null
-            return try {
-                EasyTierJNI.callJsonRpc(serviceName, methodName, domainName, payloadJson)
-            } catch (t: Throwable) {
-                Log.e(TAG, "callJsonRpc failed", t)
-                null
-            }
-        }
-
         override fun getLastError(): String? {
             return try {
                 EasyTierJNI.getLastError()
             } catch (t: Throwable) {
                 t.message
-            }
-        }
-
-        override fun startConfigServerClient(
-            url: String?,
-            hostname: String?,
-            machineId: String?,
-            secureMode: Boolean,
-            callback: IConfigServerEventCallback?
-        ): Int {
-            if (url == null || machineId == null) return -1
-            val jniCallback: ConfigServerEventCallback? = callback?.let { c ->
-                ConfigServerEventCallback { event -> c.onEvent(event) }
-            }
-            val rc = jniOrMinusOne {
-                EasyTierJNI.startConfigServerClient(
-                    url,
-                    hostname,
-                    machineId,
-                    secureMode,
-                    jniCallback
-                )
-            }
-            if (rc == 0) notifyEvent("""{"event":"config_server_started","url":"$url"}""")
-            return rc
-        }
-
-        override fun stopConfigServerClient(): Int {
-            val rc = jniOrMinusOne { EasyTierJNI.stopConfigServerClient() }
-            if (rc == 0) notifyEvent("""{"event":"config_server_stopped"}""")
-            return rc
-        }
-
-        override fun isConfigServerClientConnected(): Boolean {
-            return try {
-                EasyTierJNI.isConfigServerClientConnected()
-            } catch (t: Throwable) {
-                Log.e(TAG, "isConfigServerClientConnected failed", t)
-                false
             }
         }
 

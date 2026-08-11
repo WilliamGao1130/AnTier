@@ -110,9 +110,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 本界面启动过的实例的配置提示。 */
     private val hintsByName = mutableMapOf<String, ConfigHints>()
 
-    /** 外部实例通过 JSON-RPC 查到的配置提示缓存。 */
-    private val rpcHintsByName = mutableMapOf<String, ConfigHints>()
-
     private val statusListener = object : IEasyTierStatusListener.Stub() {
         override fun onEvent(eventJson: String?) {
             _lastEvent.value = eventJson ?: ""
@@ -299,7 +296,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         hintsByName.remove(name)
-        rpcHintsByName.remove(name)
         if (_activeTunInstance.value == name) {
             app.stopService(Intent(app, AnTierVpnService::class.java))
             _activeTunInstance.value = null
@@ -316,7 +312,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.IO) { svc.retainNetworkInstance(null) }
             }
             hintsByName.clear()
-            rpcHintsByName.clear()
             refreshStatus()
         }
     }
@@ -325,21 +320,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshStatus() {
         viewModelScope.launch {
             val svc = _service.value ?: return@launch
-            val instancesJson = withContext(Dispatchers.IO) { svc.listInstances(50) }
             val infosJson = withContext(Dispatchers.IO) { svc.collectNetworkInfos(50) }
 
-            runningNames = instancesJson?.let(::parseListInstances).orEmpty()
             runningInfo = infosJson?.let(::parseAllNetworkInfos).orEmpty()
-
-            // 外部实例通过 JSON-RPC 拉取配置，确认 no-tun/SOCKS5 模式。
-            rpcHintsByName.keys.retainAll(runningNames)
-            val externalNames = runningNames.filter {
-                it !in hintsByName && it !in rpcHintsByName
-            }
-            for (name in externalNames) {
-                val hints = withContext(Dispatchers.IO) { fetchConfigHints(svc, name) }
-                if (hints != null) rpcHintsByName[name] = hints
-            }
+            // v2.6.4 稳定 API 没有 listInstances，用 collectNetworkInfos 的 running 标志推导
+            runningNames = runningInfo.filterValues { it.running }.keys.toList()
 
             if (_activeTunInstance.value != null &&
                 _activeTunInstance.value !in runningNames
@@ -408,7 +393,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         runningNames.filterNot { it in savedNames }.forEach { name ->
-            val hints = hintsByName[name] ?: rpcHintsByName[name]
+            val hints = hintsByName[name]
             val info = runningInfo[name]
             cards.add(
                 NetworkCard(
@@ -428,7 +413,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun isNoTunInstance(name: String): Boolean =
-        hintsByName[name]?.noTun ?: rpcHintsByName[name]?.noTun ?: false
+        hintsByName[name]?.noTun ?: false
 
     private fun socks5Port(socks5Proxy: String): String? {
         if (socks5Proxy.isBlank()) return null
@@ -438,19 +423,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun ipv4PrefixLen(ipv4: String): String {
         val idx = ipv4.indexOf('/')
         return if (idx >= 0) ipv4.substring(idx + 1) else "24"
-    }
-
-    private fun parseListInstances(json: String): List<String> {
-        return try {
-            val root = JSONObject(json)
-            val names = mutableListOf<String>()
-            val keys = root.keys()
-            while (keys.hasNext()) names.add(keys.next())
-            names
-        } catch (e: Exception) {
-            Log.w(TAG, "parse list instances failed", e)
-            emptyList()
-        }
     }
 
     private fun parseAllNetworkInfos(json: String): Map<String, NetworkInfo> {
@@ -467,33 +439,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } catch (e: Exception) {
             Log.w(TAG, "parse all network infos failed", e)
             emptyMap()
-        }
-    }
-
-    private suspend fun fetchConfigHints(svc: IEasyTierService, name: String): ConfigHints? {
-        val payload = JSONObject()
-            .put("instance", JSONObject().put("instance_selector", JSONObject().put("name", name)))
-            .toString()
-        val response = svc.callJsonRpc(
-            "api.config.ConfigRpcService",
-            "get_config",
-            null,
-            payload
-        ) ?: return null
-        return try {
-            val config = JSONObject(response).optJSONObject("config") ?: return null
-            val noTun = config.optBoolean("no_tun", false)
-            val useSmoltcp = config.optBoolean("use_smoltcp", false)
-            val socks5Endpoint = if (config.optBoolean("enable_socks5", false)) {
-                val port = config.optInt("socks5_port", -1)
-                if (port > 0) "127.0.0.1:$port" else null
-            } else {
-                null
-            }
-            ConfigHints(noTun, useSmoltcp, socks5Endpoint)
-        } catch (e: Exception) {
-            Log.w(TAG, "parse config rpc response failed", e)
-            null
         }
     }
 

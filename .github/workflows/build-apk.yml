@@ -2,30 +2,11 @@ name: Build APK
 
 on:
   workflow_dispatch:
-    inputs:
-      abis:
-        description: 'JNI 目标 ABI（空格分隔）'
-        required: false
-        default: 'arm64-v8a x86_64'
-      easy_tier_ref:
-        description: 'EasyTier 源码引用（main 分支或 commit/tag）'
-        required: false
-        default: 'main'
   workflow_call:
-    inputs:
-      abis:
-        type: string
-        required: false
-        default: 'arm64-v8a x86_64'
-      easy_tier_ref:
-        type: string
-        required: false
-        default: 'main'
   push:
     branches: [ main, master ]
     paths:
       - 'app/**'
-      - 'build-jni.sh'
       - 'gradle/**'
       - '.github/workflows/build-apk.yml'
   pull_request:
@@ -49,61 +30,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve ABI list
-        id: abis
-        run: |
-          ABIS="${{ inputs.abis }}"
-          if [ -z "$ABIS" ]; then
-            ABIS="arm64-v8a x86_64"
-          fi
-          echo "abis=$ABIS" >> "$GITHUB_OUTPUT"
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK and NDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: 12.0
-          packages: 'build-tools;34.0.0 ndk;26.0.10792818 platform-tools platforms;android-35'
-
-      - name: Set NDK environment
-        run: |
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/26.0.10792818" >> "$GITHUB_ENV"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/26.0.10792818" >> "$GITHUB_ENV"
-          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
-
-      - name: Set up Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: '1.95'
-          cache: false
-          # 不注入 -D warnings：EasyTier main 存在未使用代码等警告，
-          # 保留默认 warn 级别，警告照常显示但不会导致编译失败。
-          rustflags: ''
-
-      - name: Set up protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: '35.1'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify protoc version
-        run: |
-          version="$(protoc --version | tr -d '\r')"
-          test "$version" = "libprotoc 35.1"
-
-      - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Prepare EasyTier source at pinned ref
-        if: inputs.easy_tier_ref != '' && inputs.easy_tier_ref != 'main'
-        run: |
-          git clone --depth 1 --branch "${{ inputs.easy_tier_ref }}" \
-            https://github.com/EasyTier/EasyTier.git .third_party/easytier
+          packages: 'build-tools;34.0.0 platform-tools platforms;android-35'
 
       - name: Remove stale local.properties
         run: rm -f local.properties
@@ -113,11 +50,6 @@ jobs:
         run: |
           echo "$ANTHER_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/antier-release.jks"
           echo "ANTHER_KEYSTORE_FILE=$RUNNER_TEMP/antier-release.jks" >> "$GITHUB_ENV"
-
-      - name: Build JNI libraries
-        env:
-          ABIS: ${{ steps.abis.outputs.abis }}
-        run: ./build-jni.sh
 
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug --stacktrace

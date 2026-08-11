@@ -77,6 +77,8 @@ android {
 }
 
 dependencies {
+    // JNI 内核由 easytier-jni 仓库独立构建发布（v2.6.4 稳定 API）
+    implementation("com.easytier:easytier-jni:2.6.4")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
