@@ -34,7 +34,9 @@ base64 -i antier-release.jks
 | `ANTHER_KEY_ALIAS` | 别名（如上例 `antier`） |
 | `ANTHER_KEY_PASSWORD` | 密钥口令 |
 
-CI 检测到这些 Secret 后会用同一把密钥签名 debug 与 release APK（产物 `app-release.apk`）；未配置时保持原行为（debug 临时签名 / release 不签名）。
+CI 检测到这些 Secret 后会用同一把密钥签名 APK（产物 `app-release.apk`）；未配置时构建会因缺少 Secret 报错终止，避免产出未签名包。
+
+关于签名与覆盖安装：Android 覆盖安装要求新旧 APK 签名一致，**debug 包也不例外**。配置 Secrets 后，CI 的 debug 与 release 都使用同一把密钥签名，因此两类包均可互相覆盖安装；未配置 Secrets 时 debug 使用 runner 临时密钥（每次构建都不同），无法覆盖安装。普通提交只构建 debug APK，带 `v*` 标签的 Release 流程才构建并发布 signed release APK。
 
 注意：如果设备上已安装的是旧密钥签名的 APK，第一次切换签名时仍需卸载一次；此后同密钥产出的所有 APK 均可直接覆盖安装。本地复现同一签名：
 

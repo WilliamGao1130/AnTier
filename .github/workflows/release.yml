@@ -29,8 +29,16 @@ jobs:
         with:
           path: release-artifacts
 
+      # 只发布已签名的 release APK；未签名（Secrets 未配置）直接报错，不发 Release。
+      - name: Verify signed release APK exists
+        run: |
+          test -f release-artifacts/release/app-release.apk || {
+            echo "::error::未找到已签名的 app-release.apk，请确认 4 个签名 Secrets（ANTHER_KEYSTORE_*）已配置";
+            exit 1;
+          }
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/**
+          files: release-artifacts/release/app-release.apk
           generate_release_notes: true

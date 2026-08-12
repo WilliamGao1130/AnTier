@@ -92,11 +92,13 @@ jobs:
           echo "ANTHER_KEYSTORE_FILE=$RUNNER_TEMP/antier-release.jks" >> "$GITHUB_ENV"
 
       - name: Build debug APK
-        if: steps.release_tag.outputs.skip != 'true'
+        # 普通提交/PR/手动触发只构建 debug；Release 流程不构建 debug。
+        if: steps.release_tag.outputs.skip != 'true' && inputs.from_release != 'true'
         run: ./gradlew :app:assembleDebug --stacktrace
 
-      - name: Build release APK (signed when secrets configured)
-        if: steps.release_tag.outputs.skip != 'true'
+      - name: Build signed release APK
+        # 仅 Release 流程构建 release；签名依赖 Secrets（缺一会在 decode 步骤报错）。
+        if: steps.release_tag.outputs.skip != 'true' && inputs.from_release == 'true'
         run: ./gradlew :app:assembleRelease --stacktrace
 
       - name: Upload artifacts
@@ -107,5 +109,4 @@ jobs:
           path: |
             app/build/outputs/apk/debug/app-debug.apk
             app/build/outputs/apk/release/app-release.apk
-            app/build/outputs/apk/release/app-release-unsigned.apk
           if-no-files-found: error
