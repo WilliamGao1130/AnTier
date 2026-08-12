@@ -8,37 +8,57 @@ on:
 permissions:
   contents: write
 
+# 自包含 Release 流程：不调用 build-apk.yml，避免跨工作流 artifact 传递
+# （可复用工作流上传的 artifact 对调用方后续 job 不可靠）与 from_release
+# 判断带来的“跳过/未签名”问题。直接在单个 job 内构建签名 release 并发布。
 jobs:
-  build:
-    uses: ./.github/workflows/build-apk.yml
-    # 显式把仓库 Secrets 传给被调用的 build-apk.yml，
-    # 否则 workflow_call 场景可能拿不到 ANTHER_KEYSTORE_* 导致 release 未签名。
-    secrets: inherit
-    # 标记来自 Release 流程：禁止“带 v* 标签跳过构建”生效。
-    with:
-      from_release: 'true'
-
   release:
-    needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    env:
+      ANTHER_KEYSTORE_BASE64: ${{ secrets.ANTHER_KEYSTORE_BASE64 }}
+      ANTHER_KEYSTORE_PASSWORD: ${{ secrets.ANTHER_KEYSTORE_PASSWORD }}
+      ANTHER_KEY_ALIAS: ${{ secrets.ANTHER_KEY_ALIAS }}
+      ANTHER_KEY_PASSWORD: ${{ secrets.ANTHER_KEY_PASSWORD }}
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-artifacts
+      - uses: actions/checkout@v4
 
-      # 只发布已签名的 release APK；未签名（Secrets 未配置）直接报错，不发 Release。
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12.0
+          packages: 'build-tools;34.0.0 platform-tools platforms;android-35'
+
+      - name: Remove stale local.properties
+        run: rm -f local.properties
+
+      - name: Decode release signing keystore
+        run: |
+          # Release 必须签名：4 个 Secret 缺一即报错终止。
+          for name in ANTHER_KEYSTORE_BASE64 ANTHER_KEYSTORE_PASSWORD ANTHER_KEY_ALIAS ANTHER_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Signing secret $name 为空。4 个 Secret 必须齐全：ANTHER_KEYSTORE_BASE64 / ANTHER_KEYSTORE_PASSWORD / ANTHER_KEY_ALIAS / ANTHER_KEY_PASSWORD"
+              exit 1
+            fi
+          done
+          echo "$ANTHER_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/antier-release.jks"
+          echo "ANTHER_KEYSTORE_FILE=$RUNNER_TEMP/antier-release.jks" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
+        run: ./gradlew :app:assembleRelease --stacktrace
+
       - name: Verify signed release APK exists
         run: |
-          test -f release-artifacts/release/app-release.apk || {
-            echo "::error::未找到已签名的 app-release.apk，请确认 4 个签名 Secrets（ANTHER_KEYSTORE_*）已配置";
+          test -f app/build/outputs/apk/release/app-release.apk || {
+            echo "::error::未找到已签名的 app-release.apk（签名未生效或构建失败）";
             exit 1;
           }
 
-      # 同名 Release 已存在时 action-gh-release 会失败；
-      # 先删除旧 Release（保留 tag），使重复推送 v* tag 可以覆盖更新。
       - name: Delete existing release (if any)
         run: gh release delete "${{ github.ref_name }}" --yes || true
         env:
@@ -47,5 +67,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/release/app-release.apk
+          files: app/build/outputs/apk/release/app-release.apk
           generate_release_notes: true

@@ -2,17 +2,6 @@ name: Build APK
 
 on:
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      # Release 流程调用时传 true：禁止“带 v* 标签跳过构建”生效，
-      # 因为可复用工作流里 github.event_name 继承调用方（tag push 也是 'push'），
-      # 无法用 event_name 区分直接构建与 Release 调用。
-      # 用 string 而非 boolean：boolean 输入在 inputs 上下文里是布尔值，
-      # 与字符串 'true' 比较会被 GitHub 表达式转成数字，导致判断失效。
-      from_release:
-        type: string
-        required: false
-        default: ''
   push:
     branches: [ main, master ]
     paths:
@@ -44,12 +33,12 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      # 带 v* 标签的提交：直接构建跳过（Release 流程的 workflow_call 会负责构建），
+      # 带 v* 标签的提交：直接构建跳过（Release 流程单独构建并发布），
       # 避免 master 与 tag 一起推送时同一提交构建两遍。
-      # 不能用 github.event_name == 'push' 判断：workflow_call 会继承调用方事件。
+      # build-apk.yml 不再被 workflow_call 调用，因此 event_name 判断可靠。
       - name: Skip direct build for release-tagged HEAD
         id: release_tag
-        if: inputs.from_release != 'true'
+        if: github.event_name == 'push'
         run: |
           TAG=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
           if [[ "$TAG" == v* ]]; then
@@ -92,14 +81,9 @@ jobs:
           echo "ANTHER_KEYSTORE_FILE=$RUNNER_TEMP/antier-release.jks" >> "$GITHUB_ENV"
 
       - name: Build debug APK
-        # 普通提交/PR/手动触发只构建 debug；Release 流程不构建 debug。
-        if: steps.release_tag.outputs.skip != 'true' && inputs.from_release != 'true'
+        # 普通提交/PR/手动触发只构建 debug；release 由 Release 流程单独构建。
+        if: steps.release_tag.outputs.skip != 'true'
         run: ./gradlew :app:assembleDebug --stacktrace
-
-      - name: Build signed release APK
-        # 仅 Release 流程构建 release；签名依赖 Secrets（缺一会在 decode 步骤报错）。
-        if: steps.release_tag.outputs.skip != 'true' && inputs.from_release == 'true'
-        run: ./gradlew :app:assembleRelease --stacktrace
 
       - name: Upload artifacts
         if: steps.release_tag.outputs.skip != 'true'
@@ -108,5 +92,4 @@ jobs:
           name: antier-apk-${{ github.sha }}
           path: |
             app/build/outputs/apk/debug/app-debug.apk
-            app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
