@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
+import android.os.Process
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -25,6 +26,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
+import java.util.LinkedHashSet
 
 /** 单个实例的运行时信息。 */
 data class NetworkInfo(
@@ -57,6 +61,9 @@ data class NetworkCard(
 
 /** 请求建立 VPN：携带启动 AnTierVpnService 所需的 Intent。 */
 data class VpnPrepareRequest(val serviceIntent: Intent)
+
+/** 一条运行日志（CLI 风格文本，含时间戳与级别）。 */
+data class LogEntry(val text: String)
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -101,6 +108,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _lastEvent = MutableStateFlow("")
     val lastEvent: StateFlow<String> = _lastEvent.asStateFlow()
 
+    private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
+    val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
+
+    /** 已展示过的 logcat 行（去重）。 */
+    private val seenLogcatLines = LinkedHashSet<String>()
+
     /** 运行实例的当前名称列表（refresh 时更新）。 */
     private var runningNames: List<String> = emptyList()
 
@@ -113,8 +126,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val statusListener = object : IEasyTierStatusListener.Stub() {
         override fun onEvent(eventJson: String?) {
             _lastEvent.value = eventJson ?: ""
+            if (!eventJson.isNullOrBlank()) {
+                appendLog("INFO", formatEvent(eventJson))
+            }
             refreshStatus()
         }
+    }
+
+    init {
+        startLogcatPoller()
     }
 
     private val connection = object : ServiceConnection {
@@ -167,6 +187,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _lastError.value = null
     }
 
+    fun clearLogs() {
+        _logs.value = emptyList()
+        seenLogcatLines.clear()
+    }
+
     fun consumeVpnPrepareRequest() {
         _vpnPrepareRequest.value = null
     }
@@ -176,6 +201,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val config = NetworkConfig.default()
         NetworkStore.save(app, config.instanceId, config.toToml())
         rebuildCards()
+        appendLog("INFO", "新建网络配置：${config.displayName}")
         return config.instanceId
     }
 
@@ -196,7 +222,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 启动指定网络。no-tun 实例可并发；VPN 实例按冲突策略挤占/谦让。 */
     fun startNetwork(id: String) {
         val stored = NetworkStore.get(app, id) ?: run {
-            _lastError.value = "网络配置不存在"
+            setError("网络配置不存在")
             return
         }
         val config = stored.config
@@ -211,11 +237,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val svc = _service.value
             if (svc == null) {
-                _lastError.value = "内核服务未连接"
+                setError("内核服务未连接")
                 return@launch
             }
             if (runningNames.contains(name)) {
-                _lastError.value = "实例 $name 已在运行，请先断开"
+                setError("实例 $name 已在运行，请先断开")
                 return@launch
             }
 
@@ -226,8 +252,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val policy = VpnSettingsStore.load(app).conflictPolicy
                     when (policy) {
                         VpnConflictPolicy.FIRST_COMES_FIRST -> {
-                            _lastError.value =
+                            setError(
                                 "先行者优先：已有 VPN 网络 $existingTun 在运行，本次连接谦让（未启动）"
+                            )
                             return@launch
                         }
                         VpnConflictPolicy.LAST_COMES_FIRST -> {
@@ -240,16 +267,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
             val rc = withContext(Dispatchers.IO) { svc.runNetworkInstance(stored.toml) }
             if (rc != 0) {
-                _lastError.value = withContext(Dispatchers.IO) { svc.getLastError() }
-                    ?: "启动失败"
+                setError(withContext(Dispatchers.IO) { svc.getLastError() } ?: "启动失败")
                 return@launch
             }
+            appendLog("INFO", "启动网络：$name (${if (hints.noTun) "no-tun" else "VPN"})")
             hintsByName[name] = hints
-            _lastError.value = if (hints.noTun && hints.socks5Endpoint == null) {
-                "no-tun 已启用但未配置 socks5_proxy，实例只能被访问"
-            } else {
-                null
-            }
+            setError(
+                if (hints.noTun && hints.socks5Endpoint == null) {
+                    "no-tun 已启用但未配置 socks5_proxy，实例只能被访问"
+                } else {
+                    null
+                }
+            )
             refreshStatus()
 
             // 等待 DHCP 分配虚拟 IPv4：TUN 模式需要 IP 才能建 VPN。
@@ -266,7 +295,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             if (!hints.noTun) {
-                _lastError.value = "实例 $name 已运行，但等待虚拟 IP 超时，未自动建立 VPN"
+                setError("实例 $name 已运行，但等待虚拟 IP 超时，未自动建立 VPN")
             }
         }
     }
@@ -291,10 +320,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             svc.retainNetworkInstance(keep.toTypedArray())
         }
         if (rc != 0) {
-            _lastError.value = withContext(Dispatchers.IO) { svc.getLastError() }
-                ?: "断开失败"
+            setError(withContext(Dispatchers.IO) { svc.getLastError() } ?: "断开失败")
             return
         }
+        appendLog("INFO", "断开网络：$name")
         hintsByName.remove(name)
         if (_activeTunInstance.value == name) {
             app.stopService(Intent(app, AnTierVpnService::class.java))
@@ -312,6 +341,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.IO) { svc.retainNetworkInstance(null) }
             }
             hintsByName.clear()
+            appendLog("INFO", "关闭所有网络")
             refreshStatus()
         }
     }
@@ -342,13 +372,79 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         try {
             app.startService(request.serviceIntent)
             if (instanceName != null) _activeTunInstance.value = instanceName
+            appendLog("INFO", "VPN 已授权，TUN 绑定到实例：$instanceName")
         } catch (e: Exception) {
-            _lastError.value = "启动 VPN 服务失败：${e.message}"
+            setError("启动 VPN 服务失败：${e.message}")
         }
     }
 
     fun onVpnDenied() {
-        _lastError.value = "VPN 授权被拒绝，实例仍在内核中运行（无 TUN 数据面）"
+        setError("VPN 授权被拒绝，实例仍在内核中运行（无 TUN 数据面）")
+    }
+
+    private fun startLogcatPoller() {
+        viewModelScope.launch {
+            while (true) {
+                pullLogcat()
+                delay(3000)
+            }
+        }
+    }
+
+    /**
+     * 拉取本进程（应用与内核同进程）的 logcat 日志。
+     * Android 允许应用读取自身 UID 的日志，无需 READ_LOGS 权限；
+     * 内核日志 tag 为 EasyTier-JNI，过滤后即为 CLI 风格的运行日志。
+     */
+    private fun pullLogcat() {
+        viewModelScope.launch {
+            val lines = withContext(Dispatchers.IO) {
+                runCatching {
+                    val pid = Process.myPid()
+                    val proc = ProcessBuilder(
+                        "logcat", "-d", "-v", "time", "--pid=$pid", "-t", "1000"
+                    )
+                        .redirectErrorStream(true)
+                        .start()
+                    val text = proc.inputStream.bufferedReader().use { it.readText() }
+                    proc.waitFor()
+                    text.lines().filter { it.contains("EasyTier", ignoreCase = true) }
+                }.getOrDefault(emptyList())
+            }
+            if (lines.isEmpty()) return@launch
+            val unseen = lines.filter { seenLogcatLines.add(it) }
+            if (unseen.isEmpty()) return@launch
+            _logs.value = (_logs.value + unseen.map { LogEntry(it) }).takeLast(800)
+        }
+    }
+
+    private fun appendLog(level: String, message: String) {
+        val time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+        _logs.value = (_logs.value + LogEntry("[$time] [$level] $message")).takeLast(800)
+    }
+
+    private fun setError(message: String?) {
+        _lastError.value = message
+        if (message != null) appendLog("ERROR", message)
+    }
+
+    /** 把内核事件 JSON 格式化成 CLI 风格的一行。 */
+    private fun formatEvent(eventJson: String): String {
+        return try {
+            val obj = JSONObject(eventJson)
+            val event = obj.optString("event", "unknown")
+            val detail = buildString {
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    if (key == "event") continue
+                    append(" $key=").append(obj.optString(key))
+                }
+            }
+            "event=$event$detail"
+        } catch (e: Exception) {
+            "event=$eventJson"
+        }
     }
 
     private fun requestVpn(name: String, info: NetworkInfo) {
