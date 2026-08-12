@@ -11,6 +11,9 @@ permissions:
 jobs:
   build:
     uses: ./.github/workflows/build-apk.yml
+    # 显式把仓库 Secrets 传给被调用的 build-apk.yml，
+    # 否则 workflow_call 场景可能拿不到 ANTHER_KEYSTORE_* 导致 release 未签名。
+    secrets: inherit
 
   release:
     needs: build

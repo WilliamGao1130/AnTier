@@ -29,35 +29,67 @@ jobs:
       ANTHER_KEY_PASSWORD: ${{ secrets.ANTHER_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 需要完整历史与标签，用于判断 HEAD 是否已被打 v* 发布标签
+          fetch-depth: 0
+          fetch-tags: true
+
+      # 带 v* 标签的提交：直接构建跳过（Release 流程的 workflow_call 会负责构建），
+      # 避免 master 与 tag 一起推送时同一提交构建两遍。
+      - name: Skip direct build for release-tagged HEAD
+        id: release_tag
+        if: github.event_name == 'push'
+        run: |
+          TAG=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
+          if [[ "$TAG" == v* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "HEAD 已打标签 $TAG，跳过直接构建，由 Release 流程负责"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up JDK 17
+        if: steps.release_tag.outputs.skip != 'true'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Android SDK
+        if: steps.release_tag.outputs.skip != 'true'
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: 12.0
           packages: 'build-tools;34.0.0 platform-tools platforms;android-35'
 
       - name: Remove stale local.properties
+        if: steps.release_tag.outputs.skip != 'true'
         run: rm -f local.properties
 
       - name: Decode release signing keystore
-        if: env.ANTHER_KEYSTORE_BASE64 != ''
+        if: steps.release_tag.outputs.skip != 'true' && env.ANTHER_KEYSTORE_BASE64 != ''
         run: |
+          # 只要配置了 base64，其余三个 Secret 必须齐全，否则签名被静默跳过
+          # （build.gradle 要求四个环境变量同时非空才启用签名）。
+          for name in ANTHER_KEYSTORE_PASSWORD ANTHER_KEY_ALIAS ANTHER_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Signing secret $name 为空。4 个 Secret 必须齐全：ANTHER_KEYSTORE_BASE64 / ANTHER_KEYSTORE_PASSWORD / ANTHER_KEY_ALIAS / ANTHER_KEY_PASSWORD"
+              exit 1
+            fi
+          done
           echo "$ANTHER_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/antier-release.jks"
           echo "ANTHER_KEYSTORE_FILE=$RUNNER_TEMP/antier-release.jks" >> "$GITHUB_ENV"
 
       - name: Build debug APK
+        if: steps.release_tag.outputs.skip != 'true'
         run: ./gradlew :app:assembleDebug --stacktrace
 
       - name: Build release APK (signed when secrets configured)
+        if: steps.release_tag.outputs.skip != 'true'
         run: ./gradlew :app:assembleRelease --stacktrace
 
       - name: Upload artifacts
+        if: steps.release_tag.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: antier-apk-${{ github.sha }}
