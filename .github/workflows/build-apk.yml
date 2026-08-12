@@ -3,6 +3,14 @@ name: Build APK
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      # Release 流程调用时传 true：禁止“带 v* 标签跳过构建”生效，
+      # 因为可复用工作流里 github.event_name 继承调用方（tag push 也是 'push'），
+      # 无法用 event_name 区分直接构建与 Release 调用。
+      from_release:
+        type: boolean
+        required: false
+        default: false
   push:
     branches: [ main, master ]
     paths:
@@ -36,9 +44,10 @@ jobs:
 
       # 带 v* 标签的提交：直接构建跳过（Release 流程的 workflow_call 会负责构建），
       # 避免 master 与 tag 一起推送时同一提交构建两遍。
+      # 不能用 github.event_name == 'push' 判断：workflow_call 会继承调用方事件。
       - name: Skip direct build for release-tagged HEAD
         id: release_tag
-        if: github.event_name == 'push'
+        if: inputs.from_release != 'true'
         run: |
           TAG=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
           if [[ "$TAG" == v* ]]; then

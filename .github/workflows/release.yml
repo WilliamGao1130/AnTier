@@ -14,6 +14,9 @@ jobs:
     # 显式把仓库 Secrets 传给被调用的 build-apk.yml，
     # 否则 workflow_call 场景可能拿不到 ANTHER_KEYSTORE_* 导致 release 未签名。
     secrets: inherit
+    # 标记来自 Release 流程：禁止“带 v* 标签跳过构建”生效。
+    with:
+      from_release: true
 
   release:
     needs: build
