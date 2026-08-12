@@ -7,10 +7,12 @@ on:
       # Release 流程调用时传 true：禁止“带 v* 标签跳过构建”生效，
       # 因为可复用工作流里 github.event_name 继承调用方（tag push 也是 'push'），
       # 无法用 event_name 区分直接构建与 Release 调用。
+      # 用 string 而非 boolean：boolean 输入在 inputs 上下文里是布尔值，
+      # 与字符串 'true' 比较会被 GitHub 表达式转成数字，导致判断失效。
       from_release:
-        type: boolean
+        type: string
         required: false
-        default: false
+        default: ''
   push:
     branches: [ main, master ]
     paths:

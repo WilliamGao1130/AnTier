@@ -16,7 +16,7 @@ jobs:
     secrets: inherit
     # 标记来自 Release 流程：禁止“带 v* 标签跳过构建”生效。
     with:
-      from_release: true
+      from_release: 'true'
 
   release:
     needs: build
