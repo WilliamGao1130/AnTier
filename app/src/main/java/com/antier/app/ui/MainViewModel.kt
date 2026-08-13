@@ -69,7 +69,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val TAG = "MainViewModel"
-        private const val IP_WAIT_TIMEOUT_MS = 90_000L
+        /** DHCP 未分配地址前用于先拉起 VPN 的占位地址（与 EasyTier DHCP 默认网段一致）。 */
+        private const val DHCP_PLACEHOLDER_IPV4 = "10.126.126.1/24"
 
         fun parseConfigHints(config: String): ConfigHints {
             val noTun = Regex("""no_tun\s*=\s*true""", RegexOption.IGNORE_CASE)
@@ -119,6 +120,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 运行实例的运行时信息缓存（refresh 时更新）。 */
     private var runningInfo: Map<String, NetworkInfo> = emptyMap()
+
+    /** 本应用已成功启动、但 collectNetworkInfos 尚未回报的实例名。 */
+    private val pendingRunningNames = LinkedHashSet<String>()
+
+    /** 当前传给 VpnService 的 IPv4/IPv6（用于 DHCP 换地址后重建 VPN）。 */
+    private val vpnIpv4ByName = mutableMapOf<String, String>()
+    private val vpnIpv6ByName = mutableMapOf<String, String>()
 
     /** 本界面启动过的实例的配置提示。 */
     private val hintsByName = mutableMapOf<String, ConfigHints>()
@@ -272,6 +280,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             appendLog("INFO", "启动网络：$name (${if (hints.noTun) "no-tun" else "VPN"})")
             hintsByName[name] = hints
+            // 内核启动成功后立即标记为运行，避免 collect 暂时返回空导致 UI 仍显示“连接”。
+            pendingRunningNames.add(name)
+            runningInfo = runningInfo + (name to NetworkInfo(true, null, emptyList(), null))
+            runningNames = (runningNames + name).distinct()
+            rebuildCards()
             setError(
                 if (hints.noTun && hints.socks5Endpoint == null) {
                     "no-tun 已启用但未配置 socks5_proxy，实例只能被访问"
@@ -281,21 +294,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
             refreshStatus()
 
-            // 等待 DHCP 分配虚拟 IPv4：TUN 模式需要 IP 才能建 VPN。
-            val deadline = System.currentTimeMillis() + IP_WAIT_TIMEOUT_MS
-            while (System.currentTimeMillis() < deadline) {
-                delay(1500)
-                refreshStatus()
-                val info = runningInfo[name] ?: continue
-                if (!info.running) return@launch
-                if (hints.noTun) return@launch
-                if (!info.ipv4.isNullOrEmpty()) {
-                    requestVpn(name, info)
-                    return@launch
-                }
-            }
+            // VPN 模式：立即用配置的虚拟 IP（或 DHCP 占位地址）建立 TUN。
+            // 不能等 collect 返回 IP 再建 VPN——内核要拿到 TUN fd 后 DHCP 才会分配 IP。
             if (!hints.noTun) {
-                setError("实例 $name 已运行，但等待虚拟 IP 超时，未自动建立 VPN")
+                val ipv4 = config.ipv4WithPrefix.ifBlank { DHCP_PLACEHOLDER_IPV4 }
+                requestVpn(name, ipv4, config.ipv6WithPrefix, emptyList())
             }
         }
     }
@@ -324,6 +327,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         appendLog("INFO", "断开网络：$name")
+        pendingRunningNames.remove(name)
+        vpnIpv4ByName.remove(name)
+        vpnIpv6ByName.remove(name)
         hintsByName.remove(name)
         if (_activeTunInstance.value == name) {
             app.stopService(Intent(app, AnTierVpnService::class.java))
@@ -340,6 +346,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (svc != null) {
                 withContext(Dispatchers.IO) { svc.retainNetworkInstance(null) }
             }
+            pendingRunningNames.clear()
+            vpnIpv4ByName.clear()
+            vpnIpv6ByName.clear()
             hintsByName.clear()
             appendLog("INFO", "关闭所有网络")
             refreshStatus()
@@ -348,22 +357,50 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 刷新运行实例并重建主界面卡片。 */
     fun refreshStatus() {
-        viewModelScope.launch {
-            val svc = _service.value ?: return@launch
-            val infosJson = withContext(Dispatchers.IO) { svc.collectNetworkInfos(50) }
+        viewModelScope.launch { refreshStatusInternal() }
+    }
 
-            runningInfo = infosJson?.let(::parseAllNetworkInfos).orEmpty()
-            // v2.6.4 稳定 API 没有 listInstances，用 collectNetworkInfos 的 running 标志推导
-            runningNames = runningInfo.filterValues { it.running }.keys.toList()
+    private suspend fun refreshStatusInternal() {
+        val svc = _service.value ?: return
+        val infosJson = withContext(Dispatchers.IO) { svc.collectNetworkInfos(50) }
 
-            if (_activeTunInstance.value != null &&
-                _activeTunInstance.value !in runningNames
-            ) {
-                _activeTunInstance.value = null
-                app.stopService(Intent(app, AnTierVpnService::class.java))
-            }
-            rebuildCards()
+        val parsed = infosJson?.let(::parseAllNetworkInfos).orEmpty()
+        if (infosJson == null) {
+            Log.w(TAG, "collectNetworkInfos returned null")
+        } else if (parsed.isEmpty()) {
+            Log.w(TAG, "collectNetworkInfos parsed empty: $infosJson")
         }
+
+        // 合并已由本应用启动、但收集接口暂时还没回报的实例，避免 UI 状态回退。
+        val merged = parsed.toMutableMap()
+        for (name in pendingRunningNames) {
+            if (name !in merged) {
+                merged[name] = runningInfo[name] ?: NetworkInfo(true, null, emptyList(), null)
+            }
+        }
+        pendingRunningNames.removeAll(parsed.keys)
+
+        runningInfo = merged
+        // v2.6.4 稳定 API 没有 listInstances，用 collectNetworkInfos 的 running 标志推导
+        runningNames = merged.filterValues { it.running }.keys.toList()
+
+        if (_activeTunInstance.value != null &&
+            _activeTunInstance.value !in runningNames
+        ) {
+            _activeTunInstance.value = null
+            app.stopService(Intent(app, AnTierVpnService::class.java))
+        }
+
+        // DHCP 分配到真实虚拟 IPv4 后，用真实地址重建 VPN。
+        val active = _activeTunInstance.value
+        if (active != null) {
+            val info = runningInfo[active]
+            val actualIpv4 = info?.ipv4?.let { "$it/24" }
+            if (actualIpv4 != null && actualIpv4 != vpnIpv4ByName[active]) {
+                requestVpn(active, actualIpv4, vpnIpv6ByName[active] ?: "", info.proxyCidrs)
+            }
+        }
+        rebuildCards()
     }
 
     fun onVpnGranted() {
@@ -447,12 +484,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun requestVpn(name: String, info: NetworkInfo) {
+    private fun requestVpn(
+        name: String,
+        ipv4: String,
+        ipv6: String,
+        proxyCidrs: List<String>
+    ) {
+        if (ipv4.isBlank() && ipv6.isBlank()) return
+        if (_activeTunInstance.value == name &&
+            vpnIpv4ByName[name] == ipv4 &&
+            vpnIpv6ByName[name] == ipv6
+        ) {
+            return
+        }
+
+        // 重建 VPN（例如 DHCP 换了 IP）：先停旧服务，再请求新的。
+        if (_activeTunInstance.value != null) {
+            app.stopService(Intent(app, AnTierVpnService::class.java))
+            _activeTunInstance.value = null
+        }
+        vpnIpv4ByName[name] = ipv4
+        vpnIpv6ByName[name] = ipv6
+
         val intent = Intent(app, AnTierVpnService::class.java).apply {
-            putExtra(AnTierVpnService.EXTRA_IPV4, info.ipv4)
+            if (ipv4.isNotBlank()) putExtra(AnTierVpnService.EXTRA_IPV4, ipv4)
+            if (ipv6.isNotBlank()) putExtra(AnTierVpnService.EXTRA_IPV6, ipv6)
             putStringArrayListExtra(
                 AnTierVpnService.EXTRA_PROXY_CIDRS,
-                ArrayList(info.proxyCidrs)
+                ArrayList(proxyCidrs)
             )
             putExtra(AnTierVpnService.EXTRA_INSTANCE_NAME, name)
         }
@@ -480,6 +539,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     ipText = when {
                         running && !info?.ipv4.isNullOrEmpty() ->
                             "${info?.ipv4}/${ipv4PrefixLen(config.ipv4)}"
+                        running && config.ipv4WithPrefix.isNotBlank() -> config.ipv4WithPrefix
                         !running && config.ipv4WithPrefix.isNotBlank() -> config.ipv4WithPrefix
                         else -> "未连接"
                     },

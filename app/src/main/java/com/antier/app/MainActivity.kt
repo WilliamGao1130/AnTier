@@ -33,6 +33,8 @@ class MainActivity : ComponentActivity() {
             } else {
                 viewModel.onVpnDenied()
             }
+            // 授权结果处理完后才消费请求；不能提前消费，否则 onVpnGranted 拿不到 Intent。
+            viewModel.consumeVpnPrepareRequest()
         }
 
     private val notificationLauncher =
@@ -61,10 +63,11 @@ class MainActivity : ComponentActivity() {
                             val prepareIntent = VpnService.prepare(this@MainActivity)
                             if (prepareIntent == null) {
                                 viewModel.onVpnGranted()
+                                viewModel.consumeVpnPrepareRequest()
                             } else {
                                 vpnLauncher.launch(prepareIntent)
+                                // 等待授权结果返回后再消费，避免 onVpnGranted 丢失请求。
                             }
-                            viewModel.consumeVpnPrepareRequest()
                         }
                     }
                 }

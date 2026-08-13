@@ -22,6 +22,7 @@ class AnTierVpnService : VpnService() {
     companion object {
         private const val TAG = "AnTierVpnService"
         const val EXTRA_IPV4 = "ipv4_address"
+        const val EXTRA_IPV6 = "ipv6_address"
         const val EXTRA_PROXY_CIDRS = "proxy_cidrs"
         const val EXTRA_INSTANCE_NAME = "instance_name"
     }
@@ -31,18 +32,19 @@ class AnTierVpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val ipv4 = intent?.getStringExtra(EXTRA_IPV4)
+        val ipv6 = intent?.getStringExtra(EXTRA_IPV6)
         val proxyCidrs = intent?.getStringArrayListExtra(EXTRA_PROXY_CIDRS) ?: arrayListOf()
         val instanceName = intent?.getStringExtra(EXTRA_INSTANCE_NAME)
 
-        if (ipv4 == null || instanceName == null) {
-            Log.e(TAG, "missing extras: ipv4=$ipv4, instance=$instanceName")
+        if ((ipv4 == null && ipv6 == null) || instanceName == null) {
+            Log.e(TAG, "missing extras: ipv4=$ipv4, ipv6=$ipv6, instance=$instanceName")
             stopSelf()
             return START_NOT_STICKY
         }
 
         thread {
             try {
-                setupVpnInterface(ipv4, proxyCidrs, instanceName)
+                setupVpnInterface(ipv4, ipv6, proxyCidrs, instanceName)
             } catch (t: Throwable) {
                 Log.e(TAG, "VPN setup failed", t)
                 stopSelf()
@@ -51,15 +53,27 @@ class AnTierVpnService : VpnService() {
         return START_STICKY
     }
 
-    private fun setupVpnInterface(ipv4: String, proxyCidrs: List<String>, instanceName: String) {
-        val (ip, networkLength) = parseAddress(ipv4, 24)
+    private fun setupVpnInterface(
+        ipv4: String?,
+        ipv6: String?,
+        proxyCidrs: List<String>,
+        instanceName: String
+    ) {
         val settings = VpnSettingsStore.load(this)
         val builder = Builder()
             .setSession("AnTier VPN")
             .setMtu(1380)
-            .addAddress(ip, networkLength)
             .addDnsServer("223.5.5.5")
             .addDnsServer("114.114.114.114")
+
+        if (!ipv4.isNullOrBlank()) {
+            val (ip, networkLength) = parseAddress(ipv4, 24)
+            builder.addAddress(ip, networkLength)
+        }
+        if (!ipv6.isNullOrBlank()) {
+            val (ip, networkLength) = parseAddress(ipv6, 64)
+            builder.addAddress(ip, networkLength)
+        }
 
         applyAppVisibility(builder, settings)
         applyRouting(builder, settings, proxyCidrs)

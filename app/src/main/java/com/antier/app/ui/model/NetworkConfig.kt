@@ -129,6 +129,14 @@ data class NetworkConfig(
             else -> "$ipv4/24"
         }
 
+    /** 带前缀的虚拟 IPv6（无前缀时补 /64）。 */
+    val ipv6WithPrefix: String
+        get() = when {
+            ipv6.isBlank() -> ""
+            "/" in ipv6 -> ipv6
+            else -> "$ipv6/64"
+        }
+
     fun toToml(): String = buildString {
         // 顶层键必须出现在任何表之前
         append("instance_id = \"${esc(instanceId)}\"\n")
