@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -88,7 +89,9 @@ fun NetworkEditScreen(
     var editorError by remember { mutableStateOf<String?>(null) }
 
     val networks by viewModel.networks.collectAsState()
+    val statusMap by viewModel.networkStatus.collectAsState()
     val running = networks.any { it.id == networkId && it.running }
+    val statusName = config.instanceName.ifBlank { "default" }
 
     fun toggleDescription(key: String) {
         expandedDesc = if (key in expandedDesc) expandedDesc - key else expandedDesc + key
@@ -152,6 +155,13 @@ fun NetworkEditScreen(
                         style = MaterialTheme.typography.titleMedium
                     )
                 }
+            }
+
+            item {
+                NetworkStatusCard(
+                    running = running,
+                    status = statusMap[statusName]
+                )
             }
 
             item {
@@ -1152,3 +1162,83 @@ private fun parseLines(text: String): List<String> =
         .flatMap { it.split(',') }
         .map { it.trim() }
         .filter { it.isNotEmpty() }
+
+/** 连接按钮与基础设置之间的运行状态卡：路由/对端信息 + 上下行速率。 */
+@Composable
+private fun NetworkStatusCard(running: Boolean, status: NetworkStatus?) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text("运行状态", style = MaterialTheme.typography.titleMedium)
+
+            if (!running || status == null) {
+                Text(
+                    "未连接",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                return@Column
+            }
+
+            Text("上传速率：${formatRate(status.uploadBps)}")
+            Text("下载速率：${formatRate(status.downloadBps)}")
+
+            if (status.routes.isEmpty()) {
+                Text(
+                    "暂无路由信息",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Text("路由 / 对端", style = MaterialTheme.typography.titleSmall)
+                status.routes.forEach { route ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    ) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(route.hostname, style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "IPv4：${route.ipv4}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "Cost：${route.cost}   延迟：${"%.1f".format(route.latencyMs)} ms   丢包：${"%.1f".format(route.lossRate)}%",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "隧道：${route.tunnelProto}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            if (route.proxyCidrs.isNotEmpty()) {
+                                Text(
+                                    "子网代理：${route.proxyCidrs.joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            if (route.version.isNotBlank() && route.version != "unknown") {
+                                Text(
+                                    "版本：${route.version}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun formatRate(bps: Long): String = when {
+    bps >= 1_000_000 -> String.format("%.2f MB/s", bps / 1_000_000.0)
+    bps >= 1_000 -> String.format("%.1f KB/s", bps / 1_000.0)
+    else -> "$bps B/s"
+}

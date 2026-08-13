@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -35,7 +36,29 @@ data class NetworkInfo(
     val running: Boolean,
     val ipv4: String?,
     val proxyCidrs: List<String>,
-    val errorMsg: String?
+    val errorMsg: String?,
+    val routes: List<RouteEntry> = emptyList(),
+    val rxBytes: Long = 0,
+    val txBytes: Long = 0
+)
+
+/** 一条路由/对端信息（对应 easytier-cli peer/route 输出）。 */
+data class RouteEntry(
+    val ipv4: String,
+    val hostname: String,
+    val cost: String,
+    val latencyMs: Double,
+    val lossRate: Double,
+    val tunnelProto: String,
+    val proxyCidrs: List<String>,
+    val version: String
+)
+
+/** 网络运行状态：路由表 + 上下行速率。 */
+data class NetworkStatus(
+    val routes: List<RouteEntry>,
+    val uploadBps: Long,
+    val downloadBps: Long
 )
 
 /** 从配置中提取的数据面模式提示。 */
@@ -97,6 +120,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _networks = MutableStateFlow<List<NetworkCard>>(emptyList())
     val networks: StateFlow<List<NetworkCard>> = _networks.asStateFlow()
 
+    private val _networkStatus = MutableStateFlow<Map<String, NetworkStatus>>(emptyMap())
+    val networkStatus: StateFlow<Map<String, NetworkStatus>> = _networkStatus.asStateFlow()
+
     private val _activeTunInstance = MutableStateFlow<String?>(null)
     val activeTunInstance: StateFlow<String?> = _activeTunInstance.asStateFlow()
 
@@ -127,6 +153,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 当前传给 VpnService 的 IPv4/IPv6（用于 DHCP 换地址后重建 VPN）。 */
     private val vpnIpv4ByName = mutableMapOf<String, String>()
     private val vpnIpv6ByName = mutableMapOf<String, String>()
+
+    /** 上一次字节采样（用于计算上下行速率）。 */
+    private class ByteSample(val timeMs: Long, val rxBytes: Long, val txBytes: Long)
+    private val byteSamples = mutableMapOf<String, ByteSample>()
 
     /** 本界面启动过的实例的配置提示。 */
     private val hintsByName = mutableMapOf<String, ConfigHints>()
@@ -330,6 +360,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         pendingRunningNames.remove(name)
         vpnIpv4ByName.remove(name)
         vpnIpv6ByName.remove(name)
+        byteSamples.remove(name)
         hintsByName.remove(name)
         if (_activeTunInstance.value == name) {
             app.stopService(Intent(app, AnTierVpnService::class.java))
@@ -349,6 +380,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             pendingRunningNames.clear()
             vpnIpv4ByName.clear()
             vpnIpv6ByName.clear()
+            byteSamples.clear()
             hintsByName.clear()
             appendLog("INFO", "关闭所有网络")
             refreshStatus()
@@ -400,7 +432,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 requestVpn(active, actualIpv4, vpnIpv6ByName[active] ?: "", info.proxyCidrs)
             }
         }
+        updateNetworkStatus()
         rebuildCards()
+    }
+
+    private fun updateNetworkStatus() {
+        val now = SystemClock.elapsedRealtime()
+        val statuses = mutableMapOf<String, NetworkStatus>()
+        for ((name, info) in runningInfo) {
+            val prev = byteSamples[name]
+            val dtMs = now - (prev?.timeMs ?: now)
+            val uploadBps = if (prev != null && dtMs > 0) {
+                ((info.txBytes - prev.txBytes).coerceAtLeast(0) * 1000 / dtMs)
+            } else {
+                0L
+            }
+            val downloadBps = if (prev != null && dtMs > 0) {
+                ((info.rxBytes - prev.rxBytes).coerceAtLeast(0) * 1000 / dtMs)
+            } else {
+                0L
+            }
+            byteSamples[name] = ByteSample(now, info.rxBytes, info.txBytes)
+            statuses[name] = NetworkStatus(info.routes, uploadBps, downloadBps)
+        }
+        byteSamples.keys.retainAll(runningInfo.keys)
+        _networkStatus.value = statuses
     }
 
     fun onVpnGranted() {
@@ -610,7 +666,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
             val myNode = inst.optJSONObject("my_node_info")
             val v4 = myNode?.optJSONObject("virtual_ipv4")
-            val ipv4 = v4?.let { intToIpv4(it.optLong("address", -1)) }
+            val ipv4 = ipv4FromInet(v4)
 
             val proxyCidrs = mutableListOf<String>()
             val routes = inst.optJSONArray("routes")
@@ -623,11 +679,111 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            NetworkInfo(running, ipv4, proxyCidrs.distinct(), errorMsg)
+
+            val routeEntries = mutableListOf<RouteEntry>()
+            var rxBytes = 0L
+            var txBytes = 0L
+            val pairs = inst.optJSONArray("peer_route_pairs")
+            if (pairs != null) {
+                for (i in 0 until pairs.length()) {
+                    val pair = pairs.optJSONObject(i) ?: continue
+                    val routeObj = pair.optJSONObject("route") ?: continue
+                    val peerObj = pair.optJSONObject("peer")
+
+                    val routeIpv4 = ipv4FromInet(routeObj.optJSONObject("ipv4_addr"))
+                    val hostname = routeObj.optString("hostname")
+                    val costInt = routeObj.optInt("cost", 0)
+                    val cost = when (costInt) {
+                        0 -> "Local"
+                        1 -> "DIRECT"
+                        else -> costInt.toString()
+                    }
+                    val pathLatency = routeObj.optInt("path_latency", 0).toDouble()
+                    var latencyMs = pathLatency
+                    var lossRate = 0.0
+                    val tunnelProtos = LinkedHashSet<String>()
+
+                    val conns = peerObj?.optJSONArray("conns")
+                    if (conns != null) {
+                        var latencySumUs = 0L
+                        var latencyCount = 0
+                        var lossSum = 0.0
+                        var lossCount = 0
+                        for (j in 0 until conns.length()) {
+                            val conn = conns.optJSONObject(j) ?: continue
+                            val stats = conn.optJSONObject("stats")
+                            rxBytes += stats?.optLong("rx_bytes", 0L) ?: 0L
+                            txBytes += stats?.optLong("tx_bytes", 0L) ?: 0L
+                            val latencyUs = stats?.optLong("latency_us", 0L) ?: 0L
+                            if (latencyUs > 0) {
+                                latencySumUs += latencyUs
+                                latencyCount++
+                            }
+                            if (conn.has("loss_rate")) {
+                                lossSum += conn.optDouble("loss_rate", 0.0)
+                                lossCount++
+                            }
+                            val tunnel = conn.optJSONObject("tunnel")
+                            val ttype = tunnel?.optString("tunnel_type")?.takeIf { it.isNotBlank() }
+                            if (ttype != null) tunnelProtos.add(ttype)
+                        }
+                        if (latencyCount > 0) {
+                            latencyMs = latencySumUs / 1000.0 / latencyCount
+                        }
+                        if (lossCount > 0) {
+                            lossRate = lossSum / lossCount * 100.0
+                        }
+                    }
+
+                    val routeCidrs = mutableListOf<String>()
+                    val routeCidrArr = routeObj.optJSONArray("proxy_cidrs")
+                    if (routeCidrArr != null) {
+                        for (j in 0 until routeCidrArr.length()) {
+                            routeCidrArr.optString(j)?.takeIf { it.isNotEmpty() }
+                                ?.let { routeCidrs.add(it) }
+                        }
+                    }
+
+                    routeEntries.add(
+                        RouteEntry(
+                            ipv4 = routeIpv4 ?: "-",
+                            hostname = hostname.ifBlank { "?" },
+                            cost = cost,
+                            latencyMs = latencyMs,
+                            lossRate = lossRate,
+                            tunnelProto = tunnelProtos.joinToString(",").ifBlank { "-" },
+                            proxyCidrs = routeCidrs,
+                            version = routeObj.optString("version")
+                        )
+                    )
+                }
+            }
+
+            NetworkInfo(
+                running = running,
+                ipv4 = ipv4,
+                proxyCidrs = proxyCidrs.distinct(),
+                errorMsg = errorMsg,
+                routes = routeEntries,
+                rxBytes = rxBytes,
+                txBytes = txBytes
+            )
         } catch (e: Exception) {
             Log.w(TAG, "parse network info failed", e)
             null
         }
+    }
+
+    private fun ipv4FromInet(inet: JSONObject?): String? {
+        if (inet == null) return null
+        val addressObj = inet.optJSONObject("address")
+        val addr = if (addressObj != null) {
+            addressObj.optLong("addr", -1)
+        } else {
+            inet.optLong("addr", -1)
+        }
+        val prefix = if (inet.has("network_length")) inet.optInt("network_length", 24) else 24
+        return intToIpv4(addr)?.let { "$it/$prefix" }
     }
 
     private fun intToIpv4(value: Long): String? {
